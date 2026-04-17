@@ -9,46 +9,51 @@ ASONB supports incremental updates, streaming, and random access, making it suit
 <!-- code_chunk_output -->
 
 - [1 Features](#1-features)
-- [2 Specification](#2-specification)
-  - [2.1 Encoding](#21-encoding)
-    - [2.1.1 Values](#211-values)
-    - [2.1.2 Fixed-size Values, User-defined Values, and Raw Format](#212-fixed-size-values-user-defined-values-and-raw-format)
-    - [2.1.3 Streaming and Random Access](#213-streaming-and-random-access)
-    - [2.1.4 Alignment](#214-alignment)
-  - [2.2 Document](#22-document)
-    - [2.2.1 Document Header](#221-document-header)
-    - [2.2.2 Definitions](#222-definitions)
-    - [2.2.3 Data Sections](#223-data-sections)
-  - [2.3 Data Types](#23-data-types)
-    - [2.3.1 Integers](#231-integers)
-    - [2.3.2 Unsigned Integers](#232-unsigned-integers)
-    - [2.3.3 Floating Point Numbers](#233-floating-point-numbers)
-    - [2.3.4 Boolean Values](#234-boolean-values)
-    - [2.3.5 Characters](#235-characters)
-    - [2.3.6 DateTime](#236-datetime)
-    - [2.3.7 Strings](#237-strings)
-    - [2.3.8 Byte Data](#238-byte-data)
-    - [2.3.9 Objects](#239-objects)
-    - [2.3.10 Tuples](#2310-tuples)
-    - [2.3.11 Lists](#2311-lists)
-    - [2.3.12 Named Lists](#2312-named-lists)
-    - [2.3.13 Enumerations](#2313-enumerations)
-  - [2.4 User-defined Values](#24-user-defined-values)
-    - [2.4.1 User-defined String](#241-user-defined-string)
-    - [2.4.2 User-defined Byte Data](#242-user-defined-byte-data)
-    - [2.4.3 User-defined Objects](#243-user-defined-objects)
-    - [2.4.4 User-defined Tuples](#244-user-defined-tuples)
-    - [2.4.5 User-defined Lists](#245-user-defined-lists)
-    - [2.4.6 User-defined Named Lists](#246-user-defined-named-lists)
-    - [2.4.7 User-defined Enumerations](#247-user-defined-enumerations)
-  - [2.5 Individual User-defined Values](#25-individual-user-defined-values)
-  - [2.6 Reference Values](#26-reference-values)
-    - [2.6.1 Reference String](#261-reference-string)
-    - [2.6.2 Reference Byte Data](#262-reference-byte-data)
-  - [2.7 Discrete Padding Bytes](#27-discrete-padding-bytes)
-  - [2.8 File Extension and MIME Type](#28-file-extension-and-mime-type)
-- [3 Notes for Implementations](#3-notes-for-implementations)
-- [4 Comparison with Other Binary Serialization Formats](#4-comparison-with-other-binary-serialization-formats)
+- [2 Library and APIs](#2-library-and-apis)
+  - [2.1 Deserialization and Serialization](#21-deserialization-and-serialization)
+  - [2.2 Streaming Deserialization and Serialization](#22-streaming-deserialization-and-serialization)
+- [3 Specification](#3-specification)
+  - [3.1 Encoding](#31-encoding)
+    - [3.1.1 Values](#311-values)
+    - [3.1.2 Fixed-size Values, User-defined Values, and Raw Format](#312-fixed-size-values-user-defined-values-and-raw-format)
+    - [3.1.3 Streaming and Random Access](#313-streaming-and-random-access)
+    - [3.1.4 Alignment](#314-alignment)
+  - [3.2 Document](#32-document)
+    - [3.2.1 Document Header](#321-document-header)
+    - [3.2.2 Definitions](#322-definitions)
+    - [3.2.3 Data Sections](#323-data-sections)
+  - [3.3 Data Types](#33-data-types)
+    - [3.3.1 Integers](#331-integers)
+    - [3.3.2 Unsigned Integers](#332-unsigned-integers)
+    - [3.3.3 Floating Point Numbers](#333-floating-point-numbers)
+    - [3.3.4 Boolean Values](#334-boolean-values)
+    - [3.3.5 Characters](#335-characters)
+    - [3.3.6 DateTime](#336-datetime)
+    - [3.3.7 Strings](#337-strings)
+    - [3.3.8 Byte Data](#338-byte-data)
+    - [3.3.9 Objects](#339-objects)
+    - [3.3.10 Tuples](#3310-tuples)
+    - [3.3.11 Lists](#3311-lists)
+    - [3.3.12 Named Lists](#3312-named-lists)
+    - [3.3.13 Enumerations](#3313-enumerations)
+  - [3.4 User-defined Values](#34-user-defined-values)
+    - [3.4.1 User-defined String](#341-user-defined-string)
+    - [3.4.2 User-defined Byte Data](#342-user-defined-byte-data)
+    - [3.4.3 User-defined Objects](#343-user-defined-objects)
+    - [3.4.4 User-defined Tuples](#344-user-defined-tuples)
+    - [3.4.5 User-defined Lists](#345-user-defined-lists)
+    - [3.4.6 User-defined Named Lists](#346-user-defined-named-lists)
+    - [3.4.7 User-defined Enumerations](#347-user-defined-enumerations)
+  - [3.5 Individual User-defined Values](#35-individual-user-defined-values)
+  - [3.6 Reference Values](#36-reference-values)
+    - [3.6.1 Reference String](#361-reference-string)
+    - [3.6.2 Reference Byte Data](#362-reference-byte-data)
+  - [3.7 Discrete Padding Bytes](#37-discrete-padding-bytes)
+  - [3.8 File Extension and MIME Type](#38-file-extension-and-mime-type)
+- [4 Notes for Implementations](#4-notes-for-implementations)
+- [5 Comparison with Other Binary Serialization Formats](#5-comparison-with-other-binary-serialization-formats)
+- [6 Linking](#6-linking)
+- [7 License](#7-license)
 
 <!-- /code_chunk_output -->
 
@@ -62,13 +67,171 @@ ASONB supports incremental updates, streaming, and random access, making it suit
 
 - Appendable: ASONB supports incremental updates without rewriting existing file data, making it practical for logs.
 
-## 2 Specification
+## 2 Library and APIs
 
-### 2.1 Encoding
+The Rust [asonb](https://github.com/hemashushu/asonb) library is the reference implementation of ASONB, you can add it as a dependency in your Rust project by command:
+
+```sh
+cargo add asonb
+```
+
+or by adding the following line to your `Cargo.toml` file:
+
+```toml
+[dependencies]
+asonb = "1.0.0"
+```
+
+The Rust `asonb` library provides two set APIs:
+
+1. [Serde](https://github.com/serde-rs/serde) based APIs for deserialization and serialization.
+2. Streaming APIs for incremental deserialization and serialization.
+
+### 2.1 Deserialization and Serialization
+
+Consider the following ASON document:
+
+```json5
+{
+    name: "foo"
+    version: "0.1.0"
+    dependencies: [
+        "random"
+        "regex"
+    ]
+}
+```
+
+This document consists of an object and a list. The object has `name`, `version` and `dependencies` fields, and the list has strings as elements. We can create a Rust struct corresponding to this document:
+
+```rust
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Package {
+    name: String,
+    version: String,
+    dependencies: Vec<String>,
+}
+```
+
+The struct needs to be annotated with `Serialize` and `Deserialize` traits (which are provided by the _serde_ serialization framework) to enable serialization and deserialization.
+
+The following code demonstrates how to serialize the `Package` struct instance into an binary data vector using the `asonb::ser::ser_to_writer` function:
+
+```rust
+// Serialize the `Package` struct instance into a binary data vector.
+let package = Package {
+        name: String::from("foo"),
+        version: String::from("0.1.0"),
+        dependencies: vec![
+            String::from("random"),
+            String::from("regex")
+        ],
+    };
+let mut buf: Vec<u8> = vec![];
+asonb::ser::ser_to_writer(&package, &mut buf).unwrap();
+```
+
+You can use the function `asonb::de::de_from_reader` to deserialize the ASONB binary data into a `Package` struct instance:
+
+```rust
+// Deserialize the ASONB binary data into a `Package` struct.
+let package2: Package = asonb::de::de_from_reader(&mut buf.as_slice()).unwrap();
+
+// Verify the deserialized `Package` struct.
+assert_eq!(
+    package,
+    package2
+);
+```
+
+### 2.2 Streaming Deserialization and Serialization
+
+The `asonb::de` module also provides streaming deserialization APIs, which let you deserialize ASONB binary data streams incrementally without loading the entire document into memory. This is particularly useful for large documents or for data transmitted over a network connection or pipe.
+
+Currently, the streaming deserialization APIs support only documents whose root value is a `List`. The list elements are deserialized and returned one by one through an iterator.
+
+The following code demonstrates how to use the streaming serialization API to serialize a list of `Object` structs into ASONB binary data and write it to `stdout`:
+
+```rust
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Object {
+    id: i32,
+    name: String,
+}
+
+let o1 = Object {
+    id: 11,
+    name: "foo".to_owned(),
+};
+
+let o2 = Object {
+    id: 13,
+    name: "bar".to_owned(),
+};
+
+let mut buf = std::io::stdout().lock();
+let mut ser = asonb::ser::list_to_writer(&mut buf);
+
+ser.start_list().unwrap();
+ser.serialize_element(&o1).unwrap();
+ser.serialize_element(&o2).unwrap();
+ser.end_list().unwrap();
+
+buf.flush().unwrap();
+```
+
+You can use the streaming deserialization API to read the ASONB binary data and deserialize the list of `Object` structs incrementally:
+
+```rust
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Object {
+    id: i32,
+    name: String,
+}
+
+
+let mut buf = std::io::stdin().lock();
+let mut char_iter = UTF8CharIterator::new(&mut buf);
+let mut de = ason::de::list_from_char_iterator(&mut char_iter).unwrap();
+
+let o1: Object = de.next().unwrap().unwrap();
+assert_eq!(
+    o1,
+    Object {
+        id: 11,
+        name: "foo".to_owned()
+    }
+);
+
+let o2: Object = de.next().unwrap().unwrap();
+assert_eq!(
+    o2,
+    Object {
+        id: 13,
+        name: "bar".to_owned()
+    }
+);
+
+assert!(de.next().is_none());
+
+println!("Deserialization successful!");
+```
+
+To run the above example, you can save the serialization code and deserialization code to two console applications respectively (for example, `stream-ser` and `stream-de`), then build them and run the two applications in a pipeline:
+
+```sh
+stream-ser | stream-de
+```
+
+If everything works correctly, the deserialization application will print "Deserialization successful!" to the console.
+
+## 3 Specification
+
+### 3.1 Encoding
 
 An ASONB document consists of ASON _values_ (including primitive values and compound values) in binary format.
 
-#### 2.1.1 Values
+#### 3.1.1 Values
 
 Each value is encoded as a _value prefix_ followed by a _value data block_ and an optional _end marker_.
 
@@ -138,7 +301,6 @@ The following table shows general type bytes:
 | 0xA2      | Incremental Typed List       |            |
 | 0xB0      | Named List                   |            |
 | 0xB1      | Type-specified Named List    |            |
-| 0xB2      | Incremental Typed Named List |            |
 | 0xC0-0xC3 | Enumeration                  |            |
 | 0xC4-0xC7 | Name-predefined Enumeration  |            |
 
@@ -204,7 +366,7 @@ The following table shows all possible special bytes:
 | 0xF4         | Data block section            |
 | 0xFF         | End marker                    |
 
-#### 2.1.2 Fixed-size Values, User-defined Values, and Raw Format
+#### 3.1.2 Fixed-size Values, User-defined Values, and Raw Format
 
 Most primitive values (including Integers, Floats, Booleans, Characters, DateTime, Reference String, and Reference Byte Data) are _fixed-size_, which means the length of their value data block is constant and known in advance. For example, the value data block of `i32` is always 4 bytes long, the value data block of `f64` is always 8 bytes long.
 
@@ -254,13 +416,13 @@ If you want to use the raw format for String, Byte Data, and compound values, yo
 
 Since the raw format lacks the type information, a special type byte is used if you want to use a user-defined value as document root value, or to enclose a user-defined value in a regular value, these values are called _individual user-defined values_.
 
-#### 2.1.3 Streaming and Random Access
+#### 3.1.3 Streaming and Random Access
 
 If data is produced and consumed continuously over a pipe, the regular format is used and values are accessed in a streaming manner. For small documents (such as application configuration objects or message packets), implementations can load the whole document into memory and access values directly after deserialization. This is the most common usage pattern.
 
 ASONB can also persist structured data (such as data tables) in files. In this scenario, access is usually non-sequential and high-performance random access is required. Fixed-size values and raw format allow direct access without intermediate parsing or deserialization.
 
-#### 2.1.4 Alignment
+#### 3.1.4 Alignment
 
 All values in ASONB are 4-byte aligned (except `i64`/`u64`/`f64` values). This means the starting offset of each value (both prefix and data block) must be a multiple of 4. To satisfy this requirement, padding bytes (`0x00`) may be appended after value bytes.
 
@@ -274,7 +436,7 @@ The details of the value layout and the padding rules for each data type are des
 
 > Alignments except for 4-byte alignment are not mandatory if the document is not used for memory mapping and random access.
 
-### 2.2 Document
+### 3.2 Document
 
 An ASONB document allows exactly one root value (primitive or compound). The root is commonly an Object or List, but a String or number is also valid.
 
@@ -291,7 +453,7 @@ The layout of an ASONB document is:
 ]
 ```
 
-#### 2.2.1 Document Header
+#### 3.2.1 Document Header
 
 The document header is an 8-byte metadata block with the following content:
 
@@ -322,7 +484,7 @@ The access library should throw an error if it encounters a document header with
 
 The document header is optional, but it should be included when storing ASONB documents as files (for format recognition and versioning), when documents are exposed through public APIs, or when any feature flags are required.
 
-#### 2.2.2 Definitions
+#### 3.2.2 Definitions
 
 Definitions are used to define Object field names, Enumeration variant names, and user-defined values.
 
@@ -380,7 +542,7 @@ An ASONB document can have at most `65536` name definitions and `65536` user-def
 
 The details of the definitions are described in the "User-defined Values" section.
 
-#### 2.2.3 Data Sections
+#### 3.2.3 Data Sections
 
 Data sections store payload data for reference values (Reference String and Reference Byte Data). Each data section pair consists of a _data index section_ and a _data block section_. An ASONB document can contain multiple section pairs with the following layout:
 
@@ -400,11 +562,11 @@ Data sections store payload data for reference values (Reference String and Refe
 
 The details of the data sections are described in the "Reference Values" section.
 
-### 2.3 Data Types
+### 3.3 Data Types
 
 The following sections describe the layout of the value prefix and value data block for each data type.
 
-#### 2.3.1 Integers
+#### 3.3.1 Integers
 
 Format:
 
@@ -443,7 +605,7 @@ Example of a 32-bit signed integer `0x42`:
 
 For the 64-bit integer, since the value data block is required to be 8-byte aligned, some discrete padding bytes (`0x00`) may be inserted before the value. See the "Discrete Padding Bytes" section for more details.
 
-#### 2.3.2 Unsigned Integers
+#### 3.3.2 Unsigned Integers
 
 Format:
 
@@ -454,7 +616,7 @@ Format:
 
 Unsigned integers are stored in the same way as signed integers, but with a different type byte (`0x23` to `0x26`), and `u8` and `u16` integers are zero-extended to 32 bits.
 
-#### 2.3.3 Floating Point Numbers
+#### 3.3.3 Floating Point Numbers
 
 Format:
 
@@ -471,7 +633,7 @@ Or use the compact representation for `NaN`:
 - `[0xD0, 0x00, 0x00, 0x00]`: f32 `NaN`
 - `[0xD1, 0x00, 0x00, 0x00]`: f64 `NaN`
 
-#### 2.3.4 Boolean Values
+#### 3.3.4 Boolean Values
 
 Format:
 
@@ -496,7 +658,7 @@ A compact representation for Boolean values can also be used:
 - `[0xD2, 0x00, 0x00, 0x00]`: `false`
 - `[0xD3, 0x00, 0x00, 0x00]`: `true`
 
-#### 2.3.5 Characters
+#### 3.3.5 Characters
 
 Format:
 
@@ -509,7 +671,7 @@ Format:
 ]
 ```
 
-#### 2.3.6 DateTime
+#### 3.3.6 DateTime
 
 Format:
 
@@ -533,7 +695,7 @@ Where:
 - 4-byte nanoseconds: `u32`, the number of nanoseconds since the last second, stored in little-endian format. Nanoseconds are always positive; the final DateTime value is calculated as `timestamp + nanoseconds / 1_000_000_000`.
 - 4-byte timezone offset seconds: `i32`, the number of seconds offset from UTC, stored in little-endian format. This field is used for display purposes only. For UTC DateTime values, this field should be set to `0x00_00_00_00`.
 
-#### 2.3.7 Strings
+#### 3.3.7 Strings
 
 Format:
 
@@ -584,7 +746,7 @@ If the string length is already a multiple of 4, append 4 null bytes as well (ex
 ]
 ```
 
-##### 2.3.7.1 Chunk String
+##### 3.3.7.1 Chunk String
 
 A Chunk String is encoded as a sequence of chunks, where each chunk is a fragment of the full string. The last chunk is followed by a 4-byte `0x00` end marker.
 
@@ -618,7 +780,7 @@ Each chunk also needs trailing null bytes for null-termination and alignment. Th
 
 Chunk Strings are useful for streaming scenarios where data is produced incrementally.
 
-##### 2.3.7.2 Long String
+##### 3.3.7.2 Long String
 
 If the length of a String is greater than `0xFFFF_FFFF` (4GB), the string must be encoded in the "Long String" format:
 
@@ -636,7 +798,7 @@ If the length of a String is greater than `0xFFFF_FFFF` (4GB), the string must b
 ]
 ```
 
-##### 2.3.7.3 Empty String
+##### 3.3.7.3 Empty String
 
 An empty string can be encoded as a regular String with zero length:
 
@@ -653,7 +815,7 @@ A compact representation for the empty string is provided:
 
 `[0xD4, 0x00, 0x00, 0x00]`: Empty String
 
-#### 2.3.8 Byte Data
+#### 3.3.8 Byte Data
 
 Byte Data represents arbitrary binary payloads, such as images, audio, and types not natively defined by ASONB (for example, fixed-point numbers, decimal numbers, and UUIDs).
 
@@ -687,7 +849,7 @@ For example, Byte Data `0xDE, 0xAD, 0xBE, 0xEF, 0x00` (5 bytes) is encoded as:
 ]
 ```
 
-##### 2.3.8.1 Chunk Byte Data
+##### 3.3.8.1 Chunk Byte Data
 
 Chunk Byte Data is encoded as a sequence of chunks, where each chunk is a fragment of the full Byte Data value. The last chunk is followed by a 4-byte `0x00` end marker.
 
@@ -713,7 +875,7 @@ Chunk Byte Data is encoded as a sequence of chunks, where each chunk is a fragme
 ]
 ```
 
-##### 2.3.8.2 Long Byte Data
+##### 3.3.8.2 Long Byte Data
 
 If the length of Byte Data is greater than `0xFFFF_FFFF` (4GB), the Byte Data must be encoded in the "Long Byte Data" format:
 
@@ -731,7 +893,7 @@ If the length of Byte Data is greater than `0xFFFF_FFFF` (4GB), the Byte Data mu
 ]
 ```
 
-##### 2.3.8.3 Empty Byte Data
+##### 3.3.8.3 Empty Byte Data
 
 An empty Byte Data can be encoded as a regular Byte Data with zero length:
 
@@ -748,7 +910,7 @@ A compact representation for empty Byte Data is provided:
 
 `[0xD5, 0x00, 0x00, 0x00]`: Empty Byte Data
 
-#### 2.3.9 Objects
+#### 3.3.9 Objects
 
 Objects are sequences of key-value pairs.
 
@@ -818,7 +980,7 @@ Its binary representation would be:
 ]
 ```
 
-##### 2.3.9.1 Name-predefined Object
+##### 3.3.9.1 Name-predefined Object
 
 To save space, field names can be defined in the name definition and then referenced by their indexes in the Object value.
 
@@ -911,7 +1073,7 @@ Assume the above definition is at index `0x00_01`, then Object `{id: 0x42, name:
 
 Note that the field name definition only contains the names; the types of the values are not included. Thus the values are still encoded in regular format with value prefixes.
 
-#### 2.3.10 Tuples
+#### 3.3.10 Tuples
 
 Tuples are collections of values where each value can be of any type.
 
@@ -959,7 +1121,7 @@ Its binary representation would be:
 ]
 ```
 
-#### 2.3.11 Lists
+#### 3.3.11 Lists
 
 Lists are sequences of values of the same type.
 
@@ -1010,7 +1172,7 @@ Its binary representation would be:
 ]
 ```
 
-##### 2.3.11.1 Type-specified Lists
+##### 3.3.11.1 Type-specified Lists
 
 Type-specified Lists are Lists with a specified data type for items. Values are encoded in raw format, eliminating the need for value prefixes for each item, thus making them more compact than regular Lists.
 
@@ -1050,7 +1212,7 @@ Let's rewrite the previous example List of `i32` integers `[0x11, 0x13, 0x17, 0x
 ]
 ```
 
-##### 2.3.11.2 Incremental Type-specified Lists
+##### 3.3.11.2 Incremental Type-specified Lists
 
 Incremental type-specified Lists are type-specified Lists without the list length field; the end of the list is indicated by the end of document (or EOF). Incremental type-specified Lists are only allowed as the root value of an ASONB document.
 
@@ -1066,7 +1228,7 @@ Format:
 ]
 ```
 
-#### 2.3.12 Named Lists
+#### 3.3.12 Named Lists
 
 Named Lists are similar to Lists, but each value is associated with a name. The name is usually a string or number, but it can be any type of value.
 
@@ -1144,7 +1306,7 @@ Its binary representation would be:
 ]
 ```
 
-##### 2.3.12.1 Type-specified Named Lists
+##### 3.3.12.1 Type-specified Named Lists
 
 Type-specified Named Lists are Named Lists with a specified data type for keys and values; both names and values are encoded in raw format.
 
@@ -1165,26 +1327,7 @@ Format:
 ]
 ```
 
-##### 2.3.12.2 Incremental Type-specified Named Lists
-
-Incremental type-specified Named Lists are type-specified Named Lists without the list length field; the end of the list is indicated by the end of document (or EOF). Incremental type-specified Named Lists are only allowed as the root value of an ASONB document.
-
-Format:
-
-```asonb
-[
-    0xB2,
-    1-byte value data type modifier (`u8`),
-    2-byte value data type (`u16`),
-    0x00,
-    1-byte key data type modifier (`u8`),
-    2-byte key data type (`u16`),
-    name-value pairs,
-    EOF
-]
-```
-
-#### 2.3.13 Enumerations
+#### 3.3.13 Enumerations
 
 Enumerations represent a custom data type that consists of a type name and a set of named variants. A variant can have associated data, which can be of any type.
 
@@ -1195,7 +1338,7 @@ There are four kinds of variants in ASON:
 - Object-like variant (e.g. `Shape::Rectangle { width: 10, height: 20 }`)
 - Tuple-like variant (e.g. `Color::RGB(255_u8, 127_u8, 63_u8)`)
 
-##### 2.3.13.1 Variant without value
+##### 3.3.13.1 Variant without value
 
 A variant without value is the simplest kind of variant; it only contains the type name and the variant name.
 
@@ -1245,7 +1388,7 @@ Its binary representation would be:
 ]
 ```
 
-##### 2.3.13.2 Variant with single value
+##### 3.3.13.2 Variant with single value
 
 A variant with a single value can carry a single value of any type.
 
@@ -1418,7 +1561,7 @@ Their binary representation would be:
 ]
 ```
 
-##### 2.3.13.3 `Option` and `Result` Variants
+##### 3.3.13.3 `Option` and `Result` Variants
 
 For the common `Option` and `Result` enumerations, there are compact representations for their variants:
 
@@ -1427,7 +1570,7 @@ For the common `Option` and `Result` enumerations, there are compact representat
 - `Result::Ok(value)`: `[0xD8, 0x00, 0x00, 0x00, value]`
 - `Result::Err(value)`: `[0xD9, 0x00, 0x00, 0x00, value]`
 
-##### 2.3.13.4 Object-like variant
+##### 3.3.13.4 Object-like variant
 
 Format:
 
@@ -1489,7 +1632,7 @@ Its binary representation would be:
 
 You may notice that the Object-like variant is very similar to the variant with a single Object value. The only difference is the data type byte (`0xC2` for Object-like variant and `0xC1` for variant with single value); the encoding format of the Object value is the same in both cases. This is by design.
 
-##### 2.3.13.5 Tuple-like variant
+##### 3.3.13.5 Tuple-like variant
 
 Format:
 
@@ -1506,7 +1649,7 @@ Format:
 
 The binary representation of a tuple-like variant is similar to the variant with a single Tuple value. The only difference is the data type byte (`0xC3` for tuple-like variant and `0xC1` for variant with single value).
 
-##### 2.3.13.6 Name-predefined Variants
+##### 3.3.13.6 Name-predefined Variants
 
 To save space, variant names can be defined in the name definition and then referenced by their indexes in the variant value.
 
@@ -1588,7 +1731,7 @@ Assume the above definition is at index `0x00_01`, then the variant `User::Local
 
 Name-predefined variants eliminate the type name and variant name from the variant value, making them more compact than regular variants.
 
-### 2.4 User-defined Values
+### 3.4 User-defined Values
 
 You can define a value layout (such as length, alignment, fields, and data type) in the definition section, then reference that definition in values. This allows raw-format encoding without value prefixes, which is more compact than regular encoding.
 
@@ -1596,7 +1739,7 @@ Support for user-defined values is optional for ASONB access libraries. If a doc
 
 The following sections describe the layout of user-defined value definitions.
 
-#### 2.4.1 User-defined String
+#### 3.4.1 User-defined String
 
 A user-defined String has a fixed capacity (i.e., the maximum length). The actual string data is padded with null bytes to fill the capacity. The capacity is defined in the definition.
 
@@ -1645,7 +1788,7 @@ Notes for user-defined strings:
 - The capacity should be a multiple of 4.
 - The definition specifies only capacity, not the actual string length. Actual length can be determined by finding the first null byte or by storing length in a separate value.
 
-#### 2.4.2 User-defined Byte Data
+#### 3.4.2 User-defined Byte Data
 
 A user-defined Byte Data has a fixed capacity. The actual data is padded to fill the capacity. The capacity is defined in the definition.
 
@@ -1678,7 +1821,7 @@ Notes for user-defined Byte Data:
 - The capacity should be a multiple of 4.
 - The definition only defines the capacity of the Byte Data; it does not define the actual length of the Byte Data.
 
-#### 2.4.3 User-defined Objects
+#### 3.4.3 User-defined Objects
 
 If an Object has a fixed layout (i.e., the field names, the data types, and the sizes of values are all specified), all its fields can be encoded in raw format without field names and value prefixes.
 
@@ -1787,7 +1930,7 @@ Internal padding bytes may be inserted between fields to satisfy alignment requi
 
 > User-defined Objects in raw format are significantly more compact than the regular Object values.
 
-#### 2.4.4 User-defined Tuples
+#### 3.4.4 User-defined Tuples
 
 Format:
 
@@ -1849,7 +1992,7 @@ Assuming we have already defined a user-defined String with a capacity of 32 byt
 ]
 ```
 
-#### 2.4.5 User-defined Lists
+#### 3.4.5 User-defined Lists
 
 A user-defined List is a List with a predefined length.
 
@@ -1868,7 +2011,7 @@ Format:
 ]
 ```
 
-#### 2.4.6 User-defined Named Lists
+#### 3.4.6 User-defined Named Lists
 
 A user-defined Named List is a Named List with a predefined fixed length.
 
@@ -1890,7 +2033,7 @@ Format:
 ]
 ```
 
-#### 2.4.7 User-defined Enumerations
+#### 3.4.7 User-defined Enumerations
 
 A user-defined Enumeration is an Enumeration with predefined variants.
 
@@ -1995,7 +2138,7 @@ And variant `Color::White` is encoded as:
 
 User-defined Enumerations may consume more space than regular Enumerations when the largest variant is much larger than the others.
 
-### 2.5 Individual User-defined Values
+### 3.5 Individual User-defined Values
 
 Because user-defined values in raw format do not carry type information, they are typically enclosed in user-defined compound values (such as user-defined Objects and Tuples) or type-specified Lists. When used as the document root, they require a dedicated prefix; these are called individual user-defined values.
 
@@ -2037,11 +2180,11 @@ Then an individual Object `{id: 0x42, name: "Alice"}` is encoded as:
 
 Individual user-defined values can also appear in regular compound values, acting as a bridge between regular values and raw-format user-defined values.
 
-### 2.6 Reference Values
+### 3.6 Reference Values
 
 Reference values include Reference String and Reference Byte Data. Reference values are designed to save space in the raw format for String and Byte Data by storing the actual data in a separate section and referencing it by index. The value itself only stores an index, so it is fixed-size (8 bytes) and can be enclosed in user-defined compound values and type-specified Lists.
 
-#### 2.6.1 Reference String
+#### 3.6.1 Reference String
 
 Format:
 
@@ -2109,7 +2252,7 @@ To access a Reference String value, follow these steps:
 2. Read the data index section to get the `item offset` and `item length`.
 3. Read the data block section to get the actual data.
 
-#### 2.6.2 Reference Byte Data
+#### 3.6.2 Reference Byte Data
 
 Format:
 
@@ -2124,7 +2267,7 @@ Format:
 
 Reference Byte Data is identical to Reference String except for the type byte. Both share the same data index and data block sections.
 
-### 2.7 Discrete Padding Bytes
+### 3.7 Discrete Padding Bytes
 
 In some cases, padding bytes (`0x00`) may be inserted between values to achieve alignment. These padding bytes are not part of the actual data and should be ignored when accessing values. These bytes are called _discrete padding bytes_.
 
@@ -2149,11 +2292,11 @@ If the `i64` value data block is already 8-byte aligned, discrete padding bytes 
 
 > Discrete padding bytes must not be inserted between the value prefix and the value data block, and must not be inserted between raw format values.
 
-### 2.8 File Extension and MIME Type
+### 3.8 File Extension and MIME Type
 
 The file extension for ASONB documents is `.asonb`, and the MIME type is `application/asonb`.
 
-## 3 Notes for Implementations
+## 4 Notes for Implementations
 
 Support for user-defined values and reference values is optional for ASONB access libraries. In most cases, the default ASONB feature set is sufficient.
 
@@ -2161,7 +2304,7 @@ User-defined values target scenarios where documents must be stored compactly an
 
 Reference values target scenarios with large String or Byte Data payloads where minimizing document size is important.
 
-## 4 Comparison with Other Binary Serialization Formats
+## 5 Comparison with Other Binary Serialization Formats
 
 No binary serialization format is universally best. ASONB draws inspiration from many existing formats and is designed for modern applications and workflows. Its key strengths include a rich data type system, streamability, incremental append/update workflows, and predictable layouts that support memory mapping and random access — all while balancing compactness, performance, and ease of use.
 
@@ -2174,3 +2317,12 @@ ASONB addresses some of the limitations found in existing formats:
 - **MessagePack**: Offers a straightforward encoding — essentially a compact binary translation of JSON text — but lacks support for random access.
 
 If you are developing a new application and need a binary serialization format for data pipelines or file storage, ASONB is a great choice.
+
+## 6 Linking
+
+- [ASON Specification and library](https://github.com/hemashushu/ason)
+- [ASONB Specification and library](https://github.com/hemashushu/asonb)
+
+## 7 License
+
+This project is licensed under the MPL 2.0 License with additional terms. See the files [LICENSE](./LICENSE) and [LICENSE.additional](./LICENSE.additional)
