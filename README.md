@@ -69,25 +69,33 @@ ASONB supports incremental updates, streaming, and random access, making it suit
 
 ## 2 Library and APIs
 
-The Rust [asonb](https://github.com/hemashushu/asonb) library is the reference implementation of ASONB, you can add it as a dependency in your Rust project by command:
+The Rust [asonb](https://github.com/hemashushu/asonb) crate is the reference implementation of ASONB. It exposes two public modules:
+
+1. `asonb::ser` for serialization.
+2. `asonb::de` for deserialization.
+
+Add the crate to your project with:
 
 ```sh
 cargo add asonb
 ```
 
-or by adding the following line to your `Cargo.toml` file:
+If you want to use the Serde-based APIs shown below, also add `serde` with the `derive` feature enabled:
 
 ```toml
 [dependencies]
-asonb = "1.0.0"
+asonb = "0.2.0"
+serde = { version = "1", features = ["derive"] }
 ```
 
-The Rust `asonb` library provides two set APIs:
+The crate currently provides two usage patterns:
 
-1. [Serde](https://github.com/serde-rs/serde) based APIs for deserialization and serialization.
-2. Streaming APIs for incremental deserialization and serialization.
+1. Whole-document APIs built on [Serde](https://github.com/serde-rs/serde), for reading and writing complete values.
+2. Streaming APIs for incrementally writing and reading list data.
 
 ### 2.1 Deserialization and Serialization
+
+For typical application data such as configuration files, messages, and small to medium-sized documents, the Serde-based APIs are the most convenient choice.
 
 Consider the following ASON document:
 
@@ -102,9 +110,11 @@ Consider the following ASON document:
 }
 ```
 
-This document consists of an object and a list. The object has `name`, `version` and `dependencies` fields, and the list has strings as elements. We can create a Rust struct corresponding to this document:
+The corresponding Rust type can be expressed as a normal struct that derives `Serialize` and `Deserialize`:
 
 ```rust
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct Package {
     name: String,
@@ -113,46 +123,68 @@ struct Package {
 }
 ```
 
-The struct needs to be annotated with `Serialize` and `Deserialize` traits (which are provided by the _serde_ serialization framework) to enable serialization and deserialization.
-
-The following code demonstrates how to serialize the `Package` struct instance into an binary data vector using the `asonb::ser::ser_to_writer` function:
+You can then serialize a `Package` value into any `std::io::Write` target. The example below writes into an in-memory byte buffer:
 
 ```rust
-// Serialize the `Package` struct instance into a binary data vector.
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Package {
+    name: String,
+    version: String,
+    dependencies: Vec<String>,
+}
+
 let package = Package {
-        name: String::from("foo"),
-        version: String::from("0.1.0"),
-        dependencies: vec![
-            String::from("random"),
-            String::from("regex")
-        ],
-    };
-let mut buf: Vec<u8> = vec![];
-asonb::ser::ser_to_writer(&package, &mut buf).unwrap();
+    name: String::from("foo"),
+    version: String::from("0.1.0"),
+    dependencies: vec![String::from("random"), String::from("regex")],
+};
+
+let mut bytes = Vec::new();
+asonb::ser::ser_to_writer(&package, &mut bytes).unwrap();
 ```
 
-You can use the function `asonb::de::de_from_reader` to deserialize the ASONB binary data into a `Package` struct instance:
+To deserialize, pass any `std::io::Read` source to `asonb::de::de_from_reader` and specify the destination type:
 
 ```rust
-// Deserialize the ASONB binary data into a `Package` struct.
-let package2: Package = asonb::de::de_from_reader(&mut buf.as_slice()).unwrap();
+use serde::{Deserialize, Serialize};
 
-// Verify the deserialized `Package` struct.
-assert_eq!(
-    package,
-    package2
-);
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Package {
+    name: String,
+    version: String,
+    dependencies: Vec<String>,
+}
+
+let mut bytes = Vec::new();
+asonb::ser::ser_to_writer(&package, &mut bytes).unwrap();
+
+let decoded: Package = asonb::de::de_from_reader(&mut bytes.as_slice()).unwrap();
+
+let package = Package {
+    name: String::from("foo"),
+    version: String::from("0.1.0"),
+    dependencies: vec![String::from("random"), String::from("regex")],
+};
+
+assert_eq!(decoded, package);
 ```
+
+This API style is the best fit when the full value comfortably fits in memory and you want a direct mapping between Rust data structures and ASONB documents.
 
 ### 2.2 Streaming Deserialization and Serialization
 
-The `asonb::de` module also provides streaming deserialization APIs, which let you deserialize ASONB binary data streams incrementally without loading the entire document into memory. This is particularly useful for large documents or for data transmitted over a network connection or pipe.
+For large pipelines, sockets, or append-style producers, ASONB also supports streaming list-oriented workflows. In this mode, values are produced and consumed one element at a time instead of materializing the entire document up front.
 
-Currently, the streaming deserialization APIs support only documents whose root value is a `List`. The list elements are deserialized and returned one by one through an iterator.
+Currently, the streaming APIs are centered on documents whose root value is a `List`.
 
-The following code demonstrates how to use the streaming serialization API to serialize a list of `Object` structs into ASONB binary data and write it to `stdout`:
+The streaming serializer lets you open a list writer, emit items as they become available, and then close the list explicitly:
 
 ```rust
+use serde::{Deserialize, Serialize};
+use std::io::Write;
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct Object {
     id: i32,
@@ -169,18 +201,27 @@ let o2 = Object {
     name: "bar".to_owned(),
 };
 
-let mut buf = std::io::stdout().lock();
-let mut ser = asonb::ser::list_to_writer(&mut buf);
+let mut output = std::io::stdout().lock();
+let mut ser = asonb::ser::list_to_writer(&mut output);
 
 ser.start_list().unwrap();
 ser.serialize_element(&o1).unwrap();
 ser.serialize_element(&o2).unwrap();
 ser.end_list().unwrap();
 
-buf.flush().unwrap();
+output.flush().unwrap();
 ```
 
-You can use the streaming deserialization API to read the ASONB binary data and deserialize the list of `Object` structs incrementally:
+The matching streaming deserializer consumes the root list incrementally from a binary input source. The intended flow is:
+
+1. Open a streaming list reader on any binary `Read` source.
+2. Repeatedly request the next item from the list.
+3. Deserialize each element into the Rust type you expect.
+4. Stop when the reader reports the end of the list.
+
+This mode is useful when the producer does not know the full list in advance, or when the consumer wants to start processing before the whole document has arrived.
+
+For example, the deserializer can be used to read the list of objects emitted by the serializer above:
 
 ```rust
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -189,10 +230,8 @@ struct Object {
     name: String,
 }
 
-
-let mut buf = std::io::stdin().lock();
-let mut char_iter = UTF8CharIterator::new(&mut buf);
-let mut de = ason::de::list_from_char_iterator(&mut char_iter).unwrap();
+let mut input = std::io::stdin().lock();
+let mut de = ason::de::list_from_reader(&mut input).unwrap();
 
 let o1: Object = de.next().unwrap().unwrap();
 assert_eq!(
@@ -217,13 +256,13 @@ assert!(de.next().is_none());
 println!("Deserialization successful!");
 ```
 
-To run the above example, you can save the serialization code and deserialization code to two console applications respectively (for example, `stream-ser` and `stream-de`), then build them and run the two applications in a pipeline:
+You can connect a streaming writer and reader through a Unix pipeline:
 
 ```sh
 stream-ser | stream-de
 ```
 
-If everything works correctly, the deserialization application will print "Deserialization successful!" to the console.
+In that setup, the serializer emits list elements as they are generated, and the deserializer processes them in order as they arrive.
 
 ## 3 Specification
 
