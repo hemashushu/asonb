@@ -7,28 +7,28 @@
 use std::fmt::{self, Display};
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum AsonError {
+pub enum AsonbError {
     Message(String),
 }
 
-impl Display for AsonError {
+impl Display for AsonbError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            AsonError::Message(msg) => f.write_str(msg),
+            AsonbError::Message(msg) => f.write_str(msg),
         }
     }
 }
 
-impl std::error::Error for AsonError {}
+impl std::error::Error for AsonbError {}
 
-impl serde::de::Error for AsonError {
+impl serde::de::Error for AsonbError {
     fn custom<T: Display>(msg: T) -> Self {
-        AsonError::Message(msg.to_string())
+        AsonbError::Message(msg.to_string())
     }
 }
 
-impl serde::ser::Error for AsonError {
+impl serde::ser::Error for AsonbError {
     fn custom<T: Display>(msg: T) -> Self {
-        AsonError::Message(msg.to_string())
+        AsonbError::Message(msg.to_string())
     }
 }
