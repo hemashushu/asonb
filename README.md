@@ -14,6 +14,8 @@ ASONB avoids text-based numeric parsing and repeated object field names in the v
 - [2 Library and APIs](#2-library-and-apis)
   - [2.1 Deserialization and Serialization](#21-deserialization-and-serialization)
   - [2.2 Streaming Deserialization and Serialization](#22-streaming-deserialization-and-serialization)
+    - [2.3 Rust Type Mappings](#23-rust-type-mappings)
+    - [2.4 Validation and Error Handling](#24-validation-and-error-handling)
 - [3 Quick Reference](#3-quick-reference)
   - [3.1 Document](#31-document)
     - [3.1.1 Document Header](#311-document-header)
@@ -51,7 +53,9 @@ ASONB avoids text-based numeric parsing and repeated object field names in the v
 
 ## 2 Library and APIs
 
-The Rust [asonb](https://github.com/hemashushu/asonb) crate is the reference implementation, currently under development. The APIs, `Schema` derive macro, and examples below describe the proposed interface and are not yet exported by the current source tree. The dependency version `1.0.0` is a target version, not the current crate version.
+The Rust [asonb](https://github.com/hemashushu/asonb) crate is the reference implementation, currently under development. The APIs and `Schema` derive macro below are implemented in this source tree; availability in published versions may differ. The current crate version is `0.3.0`.
+
+The repository is a Cargo workspace: `crates/asonb` contains the library, tests, and examples, and `crates/asonb-derive` contains the procedural macro. Run `cargo test --workspace` from the repository root to test both crates.
 
 The crate can be added to a project with:
 
@@ -59,11 +63,11 @@ The crate can be added to a project with:
 cargo add asonb
 ```
 
-The proposed APIs use Serde. The following dependency configuration also enables Serde's derive macros:
+The APIs use Serde. The following dependency configuration also enables Serde's derive macros. The `Schema` derive macro is always included with `asonb`; no feature configuration is needed:
 
 ```toml
 [dependencies]
-asonb = "1.0.0"
+asonb = "0.3.0"
 serde = { version = "1", features = ["derive"] }
 ```
 
@@ -118,11 +122,19 @@ To deserialize, use `asonb::de_from_reader`:
 let decoded: Package = asonb::de_from_reader(&mut bytes.as_slice()).unwrap();
 ```
 
+`asonb::ser_to_bytes` returns a `Vec<u8>` directly. `asonb::de_from_slice` reads from a byte slice and can borrow contiguous string and byte payloads. Deserialization requires only Serde's `Deserialize` trait, not `Schema`, because the document supplies its own schema.
+
+```rust
+let bytes = asonb::ser_to_bytes(&"Hello").unwrap();
+let text: &str = asonb::de_from_slice(&bytes).unwrap();
+assert_eq!(text, "Hello");
+```
+
 ### 2.2 Streaming Deserialization and Serialization
 
 For pipelines, sockets, and incremental producers, the streaming APIs process a list one element at a time without materializing the entire document.
 
-The proposed streaming APIs accept documents whose root value is a multi-chunk `List`. The element type parameter supplies the schema before any elements are written, so empty lists are supported as well.
+The streaming APIs accept documents whose root value is a multi-chunk `List`. The element type parameter supplies the schema before any elements are written, so empty lists are supported as well.
 
 The serializer opens a list, writes elements as they become available, and finishes with an explicit end marker:
 
@@ -150,7 +162,7 @@ fn main() {
     };
 
     let mut output = std::io::stdout().lock();
-    let mut stream_writer = asonb::list_stream_writer::<Object>(&mut output);
+    let mut stream_writer = asonb::list_stream_writer::<Object, _>(&mut output);
 
     // Write the document header and schema before the elements.
     stream_writer.start_list().unwrap();
@@ -193,7 +205,7 @@ struct Object {
 
 fn main() {
     let mut input = std::io::stdin().lock();
-    let mut stream_reader = asonb::list_stream_reader::<Object>(&mut input).unwrap();
+    let mut stream_reader = asonb::list_stream_reader::<Object, _>(&mut input).unwrap();
 
     // Deserialize the first element.
     let o1: Object = stream_reader.next().unwrap().unwrap();
@@ -226,13 +238,54 @@ fn main() {
 }
 ```
 
-Once the proposed APIs and example programs are implemented, they can be built and run with:
+The example programs can be built and run with:
 
 ```sh
 cargo build --examples
 cd target/debug/examples
 ./stream-writer | ./stream-reader
 ```
+
+The stream reader returns an error once and then stops. The writer rejects writes before `start_list()` or after `end_list()` or a failed write. Dropping the writer does not add an end marker. Unlike the single-document reader, the stream reader does not probe beyond an explicit end marker, so it can be used on a live socket.
+
+### 2.3 Rust Type Mappings
+
+Primitive types retain their widths. `usize` and `isize` use `u64` and `i64`, respectively, following Serde's mapping. `Vec<T>` and slices use Lists; Rust arrays and tuples use Tuples. Named structs use Objects, and enums use the four Enumeration payload forms. `Option<T>` and `Result<T, E>` retain their variant names. Ownership wrappers such as `Box<T>` serialize their contents, not pointer identities.
+
+Binary-only mappings also support `()` as an empty Tuple, unit structs as empty Objects, tuple structs as Tuples, and newtype or transparent structs as their payload. These mappings do not imply that the values can be converted to ASON text.
+
+`Vec<u8>` is a List of `u8`, not Byte Data. Use `serde_bytes::Bytes`, `serde_bytes::ByteBuf`, or `#[serde(with = "serde_bytes")]` to select Byte Data.
+
+For chrono values, use `asonb::date_time::DateTime` at the root or the field adapter below. It preserves timestamp, nanoseconds, and numeric offset directly, including offsets with second precision. Ordinary chrono serialization uses strings and must not be confused with this binary mapping.
+
+```rust
+use asonb::Schema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Schema)]
+struct Record {
+    #[serde(with = "asonb::date_time")]
+    time: chrono::DateTime<chrono::FixedOffset>,
+    #[serde(with = "serde_bytes")]
+    data: Vec<u8>,
+}
+```
+
+Add `chrono` and `serde_bytes` to the application's dependencies when using these field types and adapters. Valid wire DateTime values outside chrono's range remain accessible through the low-level `Value::DateTime` representation. Leap-second nanoseconds are rejected because ASONB requires nanoseconds below one billion.
+
+`Schema` supports generics, lifetimes, const generics, Serde renaming, skipped fields, and the documented adapters. Value-dependent `skip_serializing_if`, `flatten`, and internally tagged, adjacently tagged, or untagged enums are rejected because they do not match this static schema mapping. Other custom serializers require an explicit `#[asonb(schema_with = "path")]` schema function accepting `&mut SchemaBuilder` and returning `Result<Type, AsonbError>`. Runtime serialization still checks the emitted shape against that schema. `deserialize_any` is not supported; use a concrete target type or the low-level value APIs.
+
+For explicit encoding choices, `DocumentSchema`, `Type`, and `Value` expose all long, fixed-capacity, and multi-chunk forms through `ser_value_to_writer`, `de_value_from_reader`, and `de_value_from_slice`. Fixed String slots remain raw bytes; no NUL trimming, padding validation, or logical-length inference is performed. Multi-chunk payloads are joined for owned String/Byte Data targets and cannot be returned as a contiguous borrowed `&str` or byte slice.
+
+### 2.4 Validation and Error Handling
+
+Schemas and values have no library-imposed resource quotas. Serialization rejects recursive Rust type schemas before emitting document bytes and checks explicit document schemas for cyclic references. Deserialization checks every document schema definition, including unused definitions, for cyclic references before reading values. Shared, acyclic references are allowed; graph/pointer identity is not supported.
+
+There are no size, element-count, nesting-depth, or buffering quotas for schema names and definitions, String and Byte Data payloads, List and Map contents, or cumulative list stream length. The library still checks wire-prefix capacity, fixed-capacity framing, arithmetic overflow, platform size conversion, and input validity, and uses fallible allocation for owned payloads and unknown-length value buffers. Deeply nested documents can exhaust the call stack; large schemas and values can exhaust memory. Use streaming APIs when processing large data incrementally. Applications must provide their own resource policy when reading untrusted documents, including allocations made by custom Serde visitors.
+
+Single-document readers reject trailing bytes. Confirming EOF may block on a live source, so use them for finite documents and use the list streaming APIs for pipelines. Invalid headers, unsupported flags or versions, malformed schemas, invalid UTF-8, invalid characters, out-of-range variants, and truncated input produce `AsonbError`. Input and I/O errors include a byte offset where available.
+
+Serialization errors may leave a partial document in the writer. The library does not promise transactional writes or rollback; applications requiring atomic persistence should write to a temporary destination and commit it only after serialization succeeds.
 
 ## 3 Quick Reference
 
@@ -349,7 +402,7 @@ Multi-chunk String, Byte Data, and List values use a zero `u32` chunk length as 
 
 EOF may replace an end marker only for a root multi-chunk value and only between complete chunks. EOF within a length prefix, payload, or incomplete list element is a truncation error. Nested values require an explicit end marker. A live source must end or supply the marker before a reader can conclude that the root value is complete.
 
-Lengths and counts must be checked for overflow before calculating offsets or allocating storage. Implementations should also limit allocation sizes, element counts, and nesting depth when reading untrusted input.
+Lengths and counts must be checked for overflow before calculating offsets or allocating storage. Applications processing untrusted documents should enforce resource limits appropriate to their environment; the Rust library imposes no schema or value resource quotas.
 
 #### 3.3.1 Numeric Types
 

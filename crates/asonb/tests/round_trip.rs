@@ -1,0 +1,531 @@
+use asonb::{
+    DocumentSchema, Encoding, Field, Schema, Type, Value, Variant, de_from_reader, de_from_slice,
+    ser_to_bytes, ser_value_to_writer,
+};
+use pretty_assertions::assert_eq;
+use serde::{Deserialize, Serialize};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, HashMap},
+};
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+struct Package {
+    name: String,
+    version: String,
+    dependencies: Vec<String>,
+}
+
+#[test]
+fn test_readme_package() {
+    let value = Package {
+        name: "foo".into(),
+        version: "0.1.0".into(),
+        dependencies: vec!["random".into(), "regex".into()],
+    };
+    let bytes = ser_to_bytes(&value).unwrap();
+    assert_eq!(de_from_slice::<Package>(&bytes).unwrap(), value);
+    assert_eq!(
+        de_from_reader::<Package, _>(bytes.as_slice()).unwrap(),
+        value
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+enum Event {
+    None,
+    Number(i32),
+    Pair(String, bool),
+    Object { id: u64, name: String },
+}
+
+#[test]
+fn test_enum_variants_and_empty_containers() {
+    let values = vec![
+        Event::None,
+        Event::Number(i32::MIN),
+        Event::Pair("文\0".into(), true),
+        Event::Object {
+            id: u64::MAX,
+            name: "".into(),
+        },
+    ];
+    assert_eq!(
+        de_from_slice::<Vec<Event>>(&ser_to_bytes(&values).unwrap()).unwrap(),
+        values
+    );
+    let empty: Vec<Event> = vec![];
+    let none: Option<Event> = None;
+    assert_eq!(
+        de_from_slice::<Vec<Event>>(&ser_to_bytes(&empty).unwrap()).unwrap(),
+        empty
+    );
+    assert_eq!(
+        de_from_slice::<Option<Event>>(&ser_to_bytes(&none).unwrap()).unwrap(),
+        none
+    );
+    for value in [Ok::<Event, String>(Event::Number(42)), Err("error".into())] {
+        assert_eq!(
+            de_from_slice::<Result<Event, String>>(&ser_to_bytes(&value).unwrap()).unwrap(),
+            value
+        );
+    }
+    let map = HashMap::<String, Option<Event>>::new();
+    assert_eq!(
+        de_from_slice::<HashMap<String, Option<Event>>>(&ser_to_bytes(&map).unwrap()).unwrap(),
+        map
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+#[serde(rename_all = "camelCase")]
+struct Renamed<T> {
+    first_name: String,
+    value: T,
+    #[serde(skip)]
+    ignored: u32,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+#[serde(rename_all = "snake_case")]
+enum Acronym {
+    HTTPServer,
+    OtherValue,
+}
+
+#[test]
+fn test_serde_attributes_and_generics() {
+    let value = Renamed {
+        first_name: "Alice".into(),
+        value: vec![1i32, 2],
+        ignored: 0,
+    };
+    assert_eq!(
+        de_from_slice::<Renamed<Vec<i32>>>(&ser_to_bytes(&value).unwrap()).unwrap(),
+        value
+    );
+    assert_eq!(
+        de_from_slice::<Acronym>(&ser_to_bytes(&Acronym::HTTPServer).unwrap()).unwrap(),
+        Acronym::HTTPServer
+    );
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    #[serde(transparent)]
+    struct Transparent {
+        value: u32,
+    }
+    assert_eq!(
+        de_from_slice::<Transparent>(&ser_to_bytes(&Transparent { value: 3 }).unwrap()).unwrap(),
+        Transparent { value: 3 }
+    );
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    #[serde(bound(
+        serialize = "[u8; SIZE]: Serialize",
+        deserialize = "[u8; SIZE]: Deserialize<'de>"
+    ))]
+    struct ConstGeneric<const SIZE: usize> {
+        value: [u8; SIZE],
+    }
+    let value = ConstGeneric { value: [1, 2, 3] };
+    assert_eq!(
+        de_from_slice::<ConstGeneric<3>>(&ser_to_bytes(&value).unwrap()).unwrap(),
+        value
+    );
+}
+
+#[test]
+fn test_field_and_variant_name_resolution() {
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct Target {
+        name: String,
+        id: i32,
+        #[serde(default)]
+        active: bool,
+    }
+    let schema = DocumentSchema::new(Type::Object(
+        "UnrelatedMetadata".into(),
+        vec![
+            Field::new("id", Type::I32),
+            Field::new("extra", Type::List(Encoding::Regular, Box::new(Type::I32))),
+            Field::new("name", Type::String(Encoding::Regular)),
+        ],
+    ));
+    let value = Value::Object(vec![
+        Value::I32(11),
+        Value::List(vec![Value::I32(2)]),
+        Value::String("Alice".into()),
+    ]);
+    let mut bytes = Vec::new();
+    ser_value_to_writer(&schema, &value, &mut bytes).unwrap();
+    assert_eq!(
+        de_from_slice::<Target>(&bytes).unwrap(),
+        Target {
+            name: "Alice".into(),
+            id: 11,
+            active: false
+        }
+    );
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct Strict {
+        id: i32,
+        name: String,
+    }
+    assert!(de_from_slice::<Strict>(&bytes).is_err());
+    let schema = DocumentSchema::new(Type::Enum(
+        "".into(),
+        vec![
+            Variant::Newtype("Number".into(), Type::I32),
+            Variant::Unit("None".into()),
+        ],
+    ));
+    let mut bytes = Vec::new();
+    ser_value_to_writer(
+        &schema,
+        &Value::Enum(0, Box::new(Value::I32(9))),
+        &mut bytes,
+    )
+    .unwrap();
+    assert_eq!(de_from_slice::<Event>(&bytes).unwrap(), Event::Number(9));
+}
+
+#[test]
+fn test_date_time_and_bytes_adapters() {
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    struct Record {
+        #[serde(with = "asonb::date_time")]
+        time: chrono::DateTime<chrono::FixedOffset>,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    }
+    let instant = chrono::DateTime::from_timestamp(-1, 500_000_000).unwrap();
+    let value = Record {
+        time: instant.with_timezone(&chrono::FixedOffset::east_opt(28_801).unwrap()),
+        data: vec![0xff, 0, 1],
+    };
+    let bytes = ser_to_bytes(&value).unwrap();
+    assert_eq!(de_from_slice::<Record>(&bytes).unwrap(), value);
+    let time = asonb::date_time::DateTime(value.time);
+    assert_eq!(
+        de_from_slice::<asonb::date_time::DateTime>(&ser_to_bytes(&time).unwrap()).unwrap(),
+        time
+    );
+    let byte_value = serde_bytes::ByteBuf::from(vec![0xff, 0, 1]);
+    assert_eq!(
+        de_from_slice::<serde_bytes::ByteBuf>(&ser_to_bytes(&byte_value).unwrap()).unwrap(),
+        byte_value
+    );
+}
+
+#[test]
+fn test_borrowed_fields() {
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    struct Borrowed<'a> {
+        text: &'a str,
+        #[serde(borrow)]
+        data: &'a serde_bytes::Bytes,
+    }
+    let value = Borrowed {
+        text: "文\0",
+        data: serde_bytes::Bytes::new(&[1, 0, 0xff]),
+    };
+    let bytes = ser_to_bytes(&value).unwrap();
+    let decoded: Borrowed = de_from_slice(&bytes).unwrap();
+    assert_eq!(decoded, value);
+    let range = bytes.as_ptr() as usize..bytes.as_ptr() as usize + bytes.len();
+    assert!(range.contains(&(decoded.text.as_ptr() as usize)));
+    assert!(range.contains(&(decoded.data.as_ptr() as usize)));
+}
+
+#[test]
+fn test_nested_collections_and_binary_rust_forms() {
+    let value = (
+        vec![vec![1i8, 2], vec![]],
+        BTreeMap::from([(3u32, Some("value".to_string())), (4, None)]),
+        [true, false],
+    );
+    assert_eq!(
+        de_from_slice::<(Vec<Vec<i8>>, BTreeMap<u32, Option<String>>, [bool; 2])>(
+            &ser_to_bytes(&value).unwrap()
+        )
+        .unwrap(),
+        value
+    );
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    struct Unit;
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    struct Newtype(i32);
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    struct Tuple(i32, String);
+    assert_eq!(
+        de_from_slice::<()>(&ser_to_bytes(&()).unwrap()).unwrap(),
+        ()
+    );
+    assert_eq!(
+        de_from_slice::<Unit>(&ser_to_bytes(&Unit).unwrap()).unwrap(),
+        Unit
+    );
+    assert_eq!(
+        de_from_slice::<Newtype>(&ser_to_bytes(&Newtype(1)).unwrap()).unwrap(),
+        Newtype(1)
+    );
+    assert_eq!(
+        de_from_slice::<Tuple>(&ser_to_bytes(&Tuple(1, "a".into())).unwrap()).unwrap(),
+        Tuple(1, "a".into())
+    );
+}
+
+#[test]
+fn test_malformed_input() {
+    let schema = DocumentSchema::new(Type::List(Encoding::Long, Box::new(Type::I32)));
+    let mut bytes = Vec::new();
+    ser_value_to_writer(&schema, &Value::List(vec![]), &mut bytes).unwrap();
+    let end = bytes.len();
+    bytes[end - 8..].copy_from_slice(&(u32::MAX as u64 + 1).to_le_bytes());
+    assert!(matches!(
+        asonb::de_value_from_slice(&bytes),
+        Err(asonb::AsonbError::UnexpectedEndOfDocument(_))
+    ));
+    for nanos in [1_000_000_000u32, u32::MAX] {
+        let schema = DocumentSchema::new(Type::DateTime);
+        let mut bytes = Vec::new();
+        ser_value_to_writer(&schema, &Value::DateTime(0, 0, 0), &mut bytes).unwrap();
+        bytes[21..25].copy_from_slice(&nanos.to_le_bytes());
+        assert!(de_from_slice::<asonb::date_time::DateTime>(&bytes).is_err());
+        assert!(asonb::de_value_from_slice(&bytes).is_err());
+    }
+    let schema = DocumentSchema::new(Type::DateTime);
+    let mut bytes = Vec::new();
+    ser_value_to_writer(&schema, &Value::DateTime(i64::MAX, 0, i32::MAX), &mut bytes).unwrap();
+    assert!(asonb::de_value_from_slice(&bytes).is_ok());
+    assert!(de_from_slice::<asonb::date_time::DateTime>(&bytes).is_err());
+    let bytes = ser_to_bytes(&vec![vec![1i32, 2], vec![3, 4]]).unwrap();
+    assert_eq!(
+        de_from_slice::<Vec<Vec<i32>>>(&bytes).unwrap(),
+        vec![vec![1, 2], vec![3, 4]]
+    );
+    let fixed = DocumentSchema::new(Type::String(Encoding::Fixed(3)));
+    let mut bytes = Vec::new();
+    ser_value_to_writer(
+        &fixed,
+        &Value::Fixed(Cow::Borrowed(&[0xff, 0, 0x81])),
+        &mut bytes,
+    )
+    .unwrap();
+    assert!(de_from_slice::<String>(&bytes).is_err());
+    assert!(asonb::de_value_from_slice(&bytes).is_ok());
+}
+
+#[test]
+fn test_value_encodings_round_trip() {
+    for encoding in [
+        Encoding::Regular,
+        Encoding::Long,
+        Encoding::Fixed(4),
+        Encoding::LongFixed(4),
+        Encoding::MultiChunk,
+    ] {
+        let fixed = matches!(encoding, Encoding::Fixed(_) | Encoding::LongFixed(_));
+        let cases = [
+            (
+                Type::String(encoding.clone()),
+                if fixed {
+                    Value::Fixed(Cow::Borrowed("a文".as_bytes()))
+                } else {
+                    Value::String("a文".into())
+                },
+            ),
+            (
+                Type::Bytes(encoding.clone()),
+                if fixed {
+                    Value::Fixed(Cow::Borrowed(&[0xff, 0, 1, 2]))
+                } else {
+                    Value::Bytes(Cow::Borrowed(&[0xff, 0, 1, 2]))
+                },
+            ),
+            (
+                Type::List(encoding, Box::new(Type::I32)),
+                Value::List(vec![
+                    Value::I32(1),
+                    Value::I32(2),
+                    Value::I32(3),
+                    Value::I32(4),
+                ]),
+            ),
+        ];
+        for (ty, value) in cases {
+            let schema = DocumentSchema::new(ty);
+            let mut bytes = Vec::new();
+            ser_value_to_writer(&schema, &value, &mut bytes).unwrap();
+            assert_eq!(asonb::de_value_from_slice(&bytes).unwrap().1, value);
+            assert_eq!(
+                asonb::de_value_from_reader(bytes.as_slice()).unwrap().1,
+                value
+            );
+        }
+    }
+    for long in [false, true] {
+        let schema = DocumentSchema::new(Type::Map(long, Box::new(Type::U8), Box::new(Type::I32)));
+        let value = Value::Map(vec![
+            (Value::U8(1), Value::I32(11)),
+            (Value::U8(2), Value::I32(13)),
+        ]);
+        let mut bytes = Vec::new();
+        ser_value_to_writer(&schema, &value, &mut bytes).unwrap();
+        assert_eq!(asonb::de_value_from_slice(&bytes).unwrap().1, value);
+    }
+    let values = vec!["payload".to_string(); 16];
+    let mut bytes = Vec::new();
+    asonb::ser_to_writer(&values, &mut bytes).unwrap();
+    assert_eq!(de_from_slice::<Vec<String>>(&bytes).unwrap(), values);
+    assert_eq!(
+        asonb::de_from_reader::<Vec<String>, _>(bytes.as_slice()).unwrap(),
+        values
+    );
+    let map = BTreeMap::from([(1u8, "first".to_string()), (2, "second".to_string())]);
+    let mut bytes = Vec::new();
+    asonb::ser_to_writer(&map, &mut bytes).unwrap();
+    assert_eq!(de_from_slice::<BTreeMap<u8, String>>(&bytes).unwrap(), map);
+}
+
+#[test]
+fn test_stream_values_round_trip() {
+    let values = vec!["payload".to_string(); 16];
+    let mut bytes = Vec::new();
+    {
+        let mut writer = asonb::list_stream_writer::<String, _>(&mut bytes);
+        writer.start_list().unwrap();
+        for value in &values {
+            writer.write(value).unwrap();
+        }
+        writer.end_list().unwrap();
+    }
+    let decoded = asonb::list_stream_reader::<String, _>(bytes.as_slice())
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(decoded, values);
+    assert_eq!(de_from_slice::<Vec<String>>(&bytes).unwrap(), values);
+    let schema = DocumentSchema::new(Type::List(
+        Encoding::MultiChunk,
+        Box::new(Type::String(Encoding::Regular)),
+    ));
+    let value = Value::List(
+        values
+            .iter()
+            .map(|text| Value::String(Cow::Borrowed(text.as_str())))
+            .collect(),
+    );
+    let mut bytes = Vec::new();
+    ser_value_to_writer(&schema, &value, &mut bytes).unwrap();
+    assert_eq!(
+        asonb::list_stream_reader::<String, _>(bytes.as_slice())
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        values
+    );
+}
+
+#[test]
+fn test_unrestricted_schema_round_trip() {
+    let name_schema = DocumentSchema::new(Type::Object(
+        "Record".into(),
+        vec![Field::new("value", Type::I32)],
+    ));
+    let value = Value::Object(vec![Value::I32(1)]);
+    let mut bytes = Vec::new();
+    ser_value_to_writer(&name_schema, &value, &mut bytes).unwrap();
+    assert_eq!(
+        asonb::de_value_from_slice(&bytes).unwrap(),
+        (name_schema.clone(), value.clone())
+    );
+    assert_eq!(
+        asonb::de_value_from_reader(bytes.as_slice()).unwrap(),
+        (name_schema, value)
+    );
+    let tuple_schema = DocumentSchema::new(Type::Tuple(vec![Type::I32; 3]));
+    tuple_schema.validate().unwrap();
+    let mut ty = Type::I32;
+    let mut value = Value::I32(11);
+    for _ in 0..160 {
+        ty = Type::List(Encoding::Regular, Box::new(ty));
+        value = Value::List(vec![value]);
+    }
+    let nested_schema = DocumentSchema::new(ty);
+    let mut bytes = Vec::new();
+    ser_value_to_writer(&nested_schema, &value, &mut bytes).unwrap();
+    assert_eq!(
+        asonb::de_value_from_slice(&bytes).unwrap(),
+        (nested_schema.clone(), value.clone())
+    );
+    assert_eq!(
+        asonb::de_value_from_reader(bytes.as_slice()).unwrap(),
+        (nested_schema, value)
+    );
+    let time = asonb::date_time::DateTime(
+        chrono::DateTime::from_timestamp(0, 1)
+            .unwrap()
+            .with_timezone(&chrono::FixedOffset::east_opt(0).unwrap()),
+    );
+    let mut bytes = Vec::new();
+    asonb::ser_to_writer(&time, &mut bytes).unwrap();
+    assert_eq!(
+        de_from_slice::<asonb::date_time::DateTime>(&bytes).unwrap(),
+        time
+    );
+}
+
+#[test]
+fn test_recursive_schema_and_ignored_field_validation() {
+    #[derive(Serialize, Schema)]
+    struct Recursive {
+        next: Option<Box<Recursive>>,
+    }
+    assert!(DocumentSchema::of::<Recursive>().is_err());
+    let recursive = Recursive { next: None };
+    let mut output = Vec::new();
+    assert!(asonb::ser_to_writer(&recursive, &mut output).is_err());
+    assert!(output.is_empty());
+    let mut stream = asonb::list_stream_writer::<Recursive, _>(&mut output);
+    assert!(stream.start_list().is_err());
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct Target {
+        id: i32,
+    }
+    let schema = DocumentSchema::new(Type::Object(
+        "".into(),
+        vec![
+            Field::new("id", Type::I32),
+            Field::new("ignored", Type::String(Encoding::Regular)),
+        ],
+    ));
+    let mut bytes = Vec::new();
+    ser_value_to_writer(
+        &schema,
+        &Value::Object(vec![Value::I32(11), Value::String("a".into())]),
+        &mut bytes,
+    )
+    .unwrap();
+    assert!(de_from_slice::<Target>(&bytes).is_ok());
+    *bytes.last_mut().unwrap() = 0xff;
+    assert!(de_from_slice::<Target>(&bytes).is_err());
+}
+
+#[test]
+fn test_derive_compile_errors() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/ui/*.rs");
+}
+
+proptest::proptest! {
+    #[test]
+    fn test_generated_round_trips(values in proptest::collection::vec((proptest::prelude::any::<i64>(),proptest::prelude::any::<bool>(),".*"),0..30)){
+        let bytes=ser_to_bytes(&values).unwrap();proptest::prop_assert_eq!(de_from_slice::<Vec<(i64,bool,String)>>(&bytes).unwrap(),values);
+    }
+    #[test]
+    fn test_arbitrary_inputs_never_panic(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(),0..256)){
+        let _=asonb::de_value_from_slice(&bytes);let _=de_from_slice::<Vec<String>>(&bytes);
+    }
+}

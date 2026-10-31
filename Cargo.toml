@@ -1,18 +1,3 @@
-[package]
-name = "asonb"
-version = "0.3.0"
-edition = "2024"
-
-license = "MPL-2.0"
-description = "ASONB is a binary representation of ASON optimized for efficient storage, access, and transmission."
-homepage = "https://github.com/hemashushu/asonb"
-repository = "https://github.com/hemashushu/asonb"
-keywords = ["ason", "asonb", "serde"]
-categories = ["encoding", "parsing"]
-
-[dependencies]
-# ason = "3.0.0"
-serde = { version = "1.0.229", features = ["derive"] }
-
-[dev-dependencies]
-pretty_assertions = "1.4.1"
+[workspace]
+members = ["crates/asonb", "crates/asonb-derive"]
+resolver = "3"
