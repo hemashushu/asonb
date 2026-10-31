@@ -522,6 +522,9 @@ impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
         self.state = StreamState::Open;
         Ok(())
     }
+
+    /// Writes a single value as one chunk in the root list.
+    /// Returns an error if the list is not open.
     pub fn write(&mut self, value: &T) -> Result<(), AsonbError>
     where
         T: Serialize,
@@ -542,6 +545,37 @@ impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
         self.state = StreamState::Open;
         Ok(())
     }
+
+    /// Writes multiple values as one chunk in the root list.
+    /// Returns an error if the list is not open.
+    pub fn writes(&mut self, values: &[T]) -> Result<(), AsonbError>
+    where
+        T: Serialize,
+    {
+        if self.state != StreamState::Open {
+            return Err(AsonbError::Message("List stream is not open.".into()));
+        }
+        self.state = StreamState::Failed;
+        let schema = self
+            .schema
+            .as_ref()
+            .ok_or_else(|| AsonbError::Message("Missing stream schema.".into()))?;
+        let Type::List(_, item) = &schema.root else {
+            unreachable!()
+        };
+        // An empty slice writes nothing, since a zero count is the end marker.
+        if !values.is_empty() {
+            write_u32(self.writer, values.len() as u64)?;
+            for value in values {
+                value.serialize(&mut Serializer::new(self.writer, schema, (**item).clone()))?;
+            }
+        }
+        self.state = StreamState::Open;
+        Ok(())
+    }
+
+    /// Ends the root list by writing an explicit end marker.
+    /// Returns an error if the list is not open.
     pub fn end_list(&mut self) -> Result<(), AsonbError> {
         if self.state != StreamState::Open {
             return Err(AsonbError::Message("List stream is not open.".into()));
@@ -602,6 +636,27 @@ mod tests {
         assert!(stream.end_list().is_err());
 
         assert_eq!(&output[14..], &[1, 0, 0, 0, 11, 0, 0, 0, 0, 0, 0, 0]);
+
+        let mut output = Vec::new();
+        let mut stream = list_stream_writer::<i32, _>(&mut output);
+        assert!(stream.writes(&[1]).is_err());
+        stream.start_list().unwrap();
+        stream.writes(&[11, 22]).unwrap();
+        stream.writes(&[]).unwrap();
+        stream.write(&33).unwrap();
+        stream.end_list().unwrap();
+        assert_eq!(
+            &output[14..],
+            &[
+                2, 0, 0, 0, 11, 0, 0, 0, 22, 0, 0, 0, // chunk of 2
+                1, 0, 0, 0, 33, 0, 0, 0, // chunk of 1
+                0, 0, 0, 0 // end marker
+            ]
+        );
+        assert_eq!(
+            crate::de_from_slice::<Vec<i32>>(&output).unwrap(),
+            [11, 22, 33]
+        );
     }
 
     macro_rules! integer_test {

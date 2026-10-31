@@ -14,8 +14,8 @@ ASONB avoids text-based numeric parsing and repeated object field names in the v
 - [2 Library and APIs](#2-library-and-apis)
   - [2.1 Deserialization and Serialization](#21-deserialization-and-serialization)
   - [2.2 Streaming Deserialization and Serialization](#22-streaming-deserialization-and-serialization)
-    - [2.3 Rust Type Mappings](#23-rust-type-mappings)
-    - [2.4 Validation and Error Handling](#24-validation-and-error-handling)
+  - [2.3 Rust Type Mappings](#23-rust-type-mappings)
+  - [2.4 Validation and Error Handling](#24-validation-and-error-handling)
 - [3 Quick Reference](#3-quick-reference)
   - [3.1 Document](#31-document)
     - [3.1.1 Document Header](#311-document-header)
@@ -47,15 +47,15 @@ ASONB avoids text-based numeric parsing and repeated object field names in the v
 ## 1 Features
 
 - Streaming: ASONB supports forward-only reading and writing for producer-consumer pipelines.
-- Efficient access: ASONB allows memory-mapped access after interpreting the schema and locating the value bytes. Contiguous string and byte payloads can be accessed without copying; multi-chunk payloads require separate views for each chunk. Fixed-width layouts allow direct offset calculation, while variable-width layouts require scanning or an external index.
+- Efficient access: ASONB allows memory-mapped access after interpreting the schema and locating the value bytes, contiguous string and byte payloads can be accessed without copying.
 - Large-data support: Long and multi-chunk encodings support large strings, byte arrays, and lists without requiring the entire value to fit in memory when processed incrementally.
-- Appendable: A root multi-chunk String, Byte Data, or List can be extended by appending complete chunks when it uses EOF rather than an explicit end marker. An existing end marker must be removed or replaced before extending the value. This does not provide general append-only updates to arbitrary fields.
+- Appendable: A root multi-chunk String, Byte Data, or List can be extended by appending chunks.
 
 ## 2 Library and APIs
 
-The Rust [asonb](https://github.com/hemashushu/asonb) crate is the reference implementation, currently under development. The APIs and `Schema` derive macro below are implemented in this source tree; availability in published versions may differ. The current crate version is `0.3.0`.
+The Rust [asonb](https://github.com/hemashushu/asonb) crate is the reference implementation.
 
-The repository is a Cargo workspace: `crates/asonb` contains the library, tests, and examples, and `crates/asonb-derive` contains the procedural macro. Run `cargo test --workspace` from the repository root to test both crates.
+This repository is a Cargo workspace: `crates/asonb` contains the main library, and `crates/asonb-derive` contains the procedural macro. Run `cargo test --workspace` from the repository root to test both crates.
 
 The crate can be added to a project with:
 
@@ -63,17 +63,17 @@ The crate can be added to a project with:
 cargo add asonb
 ```
 
-The APIs use Serde. The following dependency configuration also enables Serde's derive macros. The `Schema` derive macro is always included with `asonb`; no feature configuration is needed:
+The APIs use [Serde](https://github.com/serde-rs/serde) (the serialization framework for Rust), so add it as a dependency along with `asonb` and enable Serde's `derive` feature.
 
 ```toml
 [dependencies]
-asonb = "0.3.0"
+asonb = "1.0"
 serde = { version = "1", features = ["derive"] }
 ```
 
 ### 2.1 Deserialization and Serialization
 
-The Serde-based APIs are intended for typical application data, such as configuration files, messages, and small documents. The `Schema` derive macro supplies type information independently of the value being serialized, including for empty collections and inactive enumeration variants.
+The Serde-based APIs are intended for typical application data, such as configuration files, messages, and small documents.
 
 Consider the following ASON document:
 
@@ -102,6 +102,8 @@ struct Package {
 }
 ```
 
+The `asonb::Schema` derive macro supplies type information independently of the value being serialized.
+
 Use `asonb::ser_to_writer` to serialize a value to a writer:
 
 ```rust
@@ -122,7 +124,9 @@ To deserialize, use `asonb::de_from_reader`:
 let decoded: Package = asonb::de_from_reader(&mut bytes.as_slice()).unwrap();
 ```
 
-`asonb::ser_to_bytes` returns a `Vec<u8>` directly. `asonb::de_from_slice` reads from a byte slice and can borrow contiguous string and byte payloads. Deserialization requires only Serde's `Deserialize` trait, not `Schema`, because the document supplies its own schema.
+`asonb::ser_to_bytes` returns a `Vec<u8>` directly. `asonb::de_from_slice` reads from a byte slice and can borrow contiguous string and byte payloads.
+
+When deserializing, only Serde's `Deserialize` trait is required, the `asonb::Schema` trait is optional, because the document supplies its own schema.
 
 ```rust
 let bytes = asonb::ser_to_bytes(&"Hello").unwrap();
@@ -132,9 +136,9 @@ assert_eq!(text, "Hello");
 
 ### 2.2 Streaming Deserialization and Serialization
 
-For pipelines, sockets, and incremental producers, the streaming APIs process a list one element at a time without materializing the entire document.
+For pipelines, sockets, and incremental producers, the streaming APIs process a list one or more elements at a time without materializing the entire document.
 
-The streaming APIs accept documents whose root value is a multi-chunk `List`. The element type parameter supplies the schema before any elements are written, so empty lists are supported as well.
+The streaming APIs accept documents whose root value is a multi-chunk `List`.
 
 The serializer opens a list, writes elements as they become available, and finishes with an explicit end marker:
 
@@ -172,6 +176,9 @@ fn main() {
 
     // Serialize the second element.
     stream_writer.write(&o2).unwrap();
+
+    // Serialize multiple elements at once is also supported.
+    // stream_writer.writes(&[o3, o4]).unwrap();
 
     // Write the list end marker.
     stream_writer.end_list().unwrap();
@@ -324,7 +331,7 @@ The format version is currently `0x01`. Readers must reject unsupported versions
 
 #### 3.1.2 Document Schema
 
-The schema defines the root value's structure. It contains a table of reusable type definitions followed by the root type:
+The schema defines the root value's structure. It contains a table of reusable type definitions followed by the root value type:
 
 ```text
 [
@@ -334,19 +341,21 @@ The schema defines the root value's structure. It contains a table of reusable t
 ]
 ```
 
-Reference-type definitions avoid repeating schemas, such as those for Objects, Tuples, and Enumerations. See [Reference Types](#34-reference-types) for details. The count specifies the number of definitions, not their total byte length; there is no separate schema-length prefix.
+Reference-type definitions avoid repeating schemas, such as those for Objects, Tuples, and Enumerations. See [Reference Types](#34-reference-types) for details. The count specifies the number of definitions, not their total byte length.
 
-The root type, together with any definitions it references, describes the document's single root value. Names in the schema use regular String value encoding: a `u32` byte length followed by UTF-8 bytes, with no String type-class byte or null terminator.
+The root value type, together with any definitions it references, describes the document's single root value.
+
+Note that names in the schema use regular String value encoding: a `u32` byte length followed by UTF-8 bytes, with no String type-class byte or null terminator.
 
 #### 3.1.3 Root Value Binary
 
-The root value bytes immediately follow the schema. Their layout is determined by the root type, as described in [Encoding](#33-encoding).
+The root value bytes immediately follow the schema. Their layout is determined by the root value type, as described in [Encoding](#33-encoding).
 
 ### 3.2 Type Definitions
 
-ASONB represents ASON's primitive and compound value types, including numbers, Booleans, Strings, Lists, Maps, Objects, Tuples, and Enumerations. It also provides encoding forms for streaming and low-level storage.
+ASONB represents ASON's primitive and compound value types, including numbers, Booleans, Strings, Lists, Maps, Objects, Tuples, and Enumerations.
 
-Each type definition starts with a one-byte type class, followed by any type-specific parameters:
+Each type definition starts with a one-byte type class, followed by any type-specific bytes:
 
 ```text
 [
@@ -384,9 +393,9 @@ Most significant bit -------    ------- Least significant bit
 
 The categories are:
 
-- 1: signed integers
-- 2: unsigned integers
-- 3: floating-point numbers
+- `1`: signed integers
+- `2`: unsigned integers
+- `3`: floating-point numbers
 
 The size indicator is the base-2 logarithm of the width in bits: `0x3` means `2^3 = 8` bits, and `0x6` means `2^6 = 64` bits. Only the combinations listed in the table are currently defined; the bit layout does not imply support for other numeric widths.
 
@@ -398,9 +407,9 @@ All integers and IEEE 754 floating-point bit patterns are stored in little-endia
 
 Fixed-capacity String, Byte Data, and List encodings are intended for low-level systems that need reserved storage or predictable layouts. ASONB specifies their capacities and framing, but does not prescribe logical content lengths, padding values, or how applications distinguish content from unused capacity. The zero-filled examples below illustrate an application convention, not a format requirement. Fixed-capacity Lists still contain the number of element encodings specified by their capacity, allowing readers to locate subsequent values.
 
-Multi-chunk String, Byte Data, and List values use a zero `u32` chunk length as an end marker, not as an empty data chunk. The marker occupies exactly four bytes and has no payload. An empty multi-chunk value consists of this marker, or immediate EOF if it is the root value.
+Multi-chunk String, Byte Data, and List values use a zero chunk length (`0x00 0x00 0x00 0x00`) as an end marker, not as an empty data chunk. The marker occupies exactly four bytes and has no payload. An empty multi-chunk value consists of this marker, or immediate EOF if it is the root value.
 
-EOF may replace an end marker only for a root multi-chunk value and only between complete chunks. EOF within a length prefix, payload, or incomplete list element is a truncation error. Nested values require an explicit end marker. A live source must end or supply the marker before a reader can conclude that the root value is complete.
+EOF may replace an end marker only for a root multi-chunk value. EOF within a length prefix, payload, or incomplete list element is a truncation error. Nested values require an explicit end marker. A live source must end or supply the marker before a reader can conclude that the root value is complete.
 
 Lengths and counts must be checked for overflow before calculating offsets or allocating storage. Applications processing untrusted documents should enforce resource limits appropriate to their environment; the Rust library imposes no schema or value resource quotas.
 
@@ -477,6 +486,7 @@ Their type definitions and value layouts are:
 | Fixed-capacity String      | [0x51, capacity in `u32`] | [capacity bytes; application-defined content and padding] |
 | Long fixed-capacity String | [0x59, capacity in `u64`] | [capacity bytes; application-defined content and padding] |
 | Multi-chunk String         | [0x52]          | [[length in `u32`, UTF-8 encoded bytes], ..., optional end marker] |
+
 ##### 3.3.5.1 Regular String
 
 A regular String consists of a `u32` byte length followed by that many UTF-8 bytes. There is no null terminator.
@@ -1089,12 +1099,12 @@ Each entry in the reference-type table is a complete type definition. Any suppor
 For example, consider these two Object schemas:
 
 ```text
-Address: {
+Object Address: {
     street: String,
     city: String,
 }
 
-Person: {
+Object Person: {
     name: String,
     age: i32,
     address: Address
@@ -1144,7 +1154,9 @@ Their reference-type table is:
 ]
 ```
 
-The `address` field uses `[0xC0, 0x00, 0x00, 0x00, 0x00]` to reuse the schema at index zero, `Address`. Each Person value contains its own encoded Address value, not a pointer to another value. This example shows only the reference-type table; a complete document also needs a header, a root type, and the root value bytes.
+The `address` field uses `[0xC0, 0x00, 0x00, 0x00, 0x00]` to reuse the schema at index zero, `Address`. Each Person value contains its own encoded Address value, not a pointer to another value.
+
+Note that this example shows only the reference-type table; a complete document also needs a header, a root value type, and the root value bytes.
 
 ### 3.5 Conversion to and from ASON
 
