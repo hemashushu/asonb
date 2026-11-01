@@ -1,6 +1,6 @@
 [package]
 name = "asonb"
-version = "1.0.0"
+version = "3.1.2"
 edition = "2024"
 
 license-file = "LICENSE.additional"
@@ -12,10 +12,10 @@ keywords = ["ason", "asonb", "serde"]
 categories = ["encoding", "parsing"]
 
 [dependencies]
-serde = { version = "1.0.229", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde_bytes = "0.11"
-asonb-derive = { path = "../asonb-derive", version = "1.0.0" }
+asonb-derive = { path = "../asonb-derive", version = "3.1.2" }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

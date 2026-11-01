@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Hemashushu <hippospark@gmail.com>, All rights reserved.
+//
+// This Source Code Form is subject to the terms of
+// the Mozilla Public License version 2.0 and additional exceptions.
+// For more details, see the LICENSE, LICENSE.additional, and CONTRIBUTING files.
+
 //! Explicit values for applications that select their own wire schema.
 //! Fixed slots are kept as raw bytes: the library never invents a logical
 //! length or interprets application-defined padding.

@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Hemashushu <hippospark@gmail.com>, All rights reserved.
+//
+// This Source Code Form is subject to the terms of
+// the Mozilla Public License version 2.0 and additional exceptions.
+// For more details, see the LICENSE, LICENSE.additional, and CONTRIBUTING files.
+
 //! Generate value-independent schemas using Serde's serialization names.
 
 use proc_macro::TokenStream;
@@ -189,6 +195,19 @@ fn field_type(
         return match adapter.as_str() {
             "serde_bytes" => Ok(quote!(#root::Type::Bytes(#root::Encoding::Regular))),
             "asonb::date_time" | "crate::date_time" => Ok(quote!(#root::Type::DateTime)),
+            "asonb::array" | "crate::array" => {
+                let syn::Type::Array(array) = &field.ty else {
+                    return Err(syn::Error::new_spanned(
+                        field,
+                        "the asonb::array adapter requires a fixed-size array field",
+                    ));
+                };
+                let item = &array.elem;
+                Ok(quote!(#root::Type::List(
+                    #root::Encoding::Regular,
+                    Box::new(builder.build::<#item>()?)
+                )))
+            }
             _ => Err(syn::Error::new_spanned(
                 field,
                 "custom serialization requires #[asonb(schema_with = \"path\")]",

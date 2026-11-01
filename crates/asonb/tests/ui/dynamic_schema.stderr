@@ -1,5 +1,5 @@
 error: this Serde representation has no fixed ASONB schema
- --> tests/ui/dynamic_schema.rs:3:13
+ --> tests/ui/dynamic_schema.rs:9:13
   |
-3 |     #[serde(skip_serializing_if = "Option::is_none")]
+9 |     #[serde(skip_serializing_if = "Option::is_none")]
   |             ^^^^^^^^^^^^^^^^^^^

@@ -67,8 +67,8 @@ The APIs use [Serde](https://github.com/serde-rs/serde) (the serialization frame
 
 ```toml
 [dependencies]
-asonb = "1.0"
-serde = { version = "1", features = ["derive"] }
+asonb = "3.1"
+serde = { version = "1.0", features = ["derive"] }
 ```
 
 ### 2.1 Deserialization and Serialization
@@ -263,6 +263,15 @@ Binary-only mappings also support `()` as an empty Tuple, unit structs as empty 
 
 `Vec<u8>` is a List of `u8`, not Byte Data. Use `serde_bytes::Bytes`, `serde_bytes::ByteBuf`, or `#[serde(with = "serde_bytes")]` to select Byte Data.
 
+Rust fixed-size arrays `[T; N]` use Tuples by default, with one element type per position. For a field that should use a List instead, apply `#[serde(with = "asonb::array")]`. This adapter supports any `N`, including zero and lengths greater than 32, and deserialization requires exactly `N` elements. For `[u8; N]`, `#[serde(with = "serde_bytes")]` selects Byte Data; this is separate from both the default Tuple mapping and the `asonb::array` List mapping. `Vec<u8>` remains a List of `u8` unless annotated with `serde_bytes`.
+
+| Rust field type                 | Default mapping      | `#[serde(with = "serde_bytes")]` | `#[serde(with = "asonb::array")]` |
+|---------------------------------|----------------------|----------------------------------|------------------------------------|
+| `[u8; N]`                       | Tuple of `u8` values | Byte Data     | List of `u8` values |
+| `[T; N]`, where `T` is not `u8` | Tuple of `T` values  | Not supported | List of `T` values  |
+
+The default Tuple mapping follows Serde's array implementations. ASONB's binary format supports empty Tuples; this binary-only mapping does not imply that the value can be converted to ASON text.
+
 For chrono values, use `asonb::date_time::DateTime` at the root or the field adapter below. It preserves timestamp, nanoseconds, and numeric offset directly, including offsets with second precision. Ordinary chrono serialization uses strings and must not be confused with this binary mapping.
 
 ```rust
@@ -278,7 +287,7 @@ struct Record {
 }
 ```
 
-Add `chrono` and `serde_bytes` to the application's dependencies when using these field types and adapters. Valid wire DateTime values outside chrono's range remain accessible through the low-level `Value::DateTime` representation. Leap-second nanoseconds are rejected because ASONB requires nanoseconds below one billion.
+Add `chrono` and `serde_bytes` crates to the application's dependencies when using these field types and adapters. Valid wire DateTime values outside chrono's range remain accessible through the low-level `Value::DateTime` representation. Leap-second nanoseconds are rejected because ASONB requires nanoseconds below one billion.
 
 `Schema` supports generics, lifetimes, const generics, Serde renaming, skipped fields, and the documented adapters. Value-dependent `skip_serializing_if`, `flatten`, and internally tagged, adjacently tagged, or untagged enums are rejected because they do not match this static schema mapping. Other custom serializers require an explicit `#[asonb(schema_with = "path")]` schema function accepting `&mut SchemaBuilder` and returning `Result<Type, AsonbError>`. Runtime serialization still checks the emitted shape against that schema. `deserialize_any` is not supported; use a concrete target type or the low-level value APIs.
 
@@ -288,7 +297,7 @@ For explicit encoding choices, `DocumentSchema`, `Type`, and `Value` expose all 
 
 Schemas and values have no library-imposed resource quotas. Serialization rejects recursive Rust type schemas before emitting document bytes and checks explicit document schemas for cyclic references. Deserialization checks every document schema definition, including unused definitions, for cyclic references before reading values. Shared, acyclic references are allowed; graph/pointer identity is not supported.
 
-There are no size, element-count, nesting-depth, or buffering quotas for schema names and definitions, String and Byte Data payloads, List and Map contents, or cumulative list stream length. The library still checks wire-prefix capacity, fixed-capacity framing, arithmetic overflow, platform size conversion, and input validity, and uses fallible allocation for owned payloads and unknown-length value buffers. Deeply nested documents can exhaust the call stack; large schemas and values can exhaust memory. Use streaming APIs when processing large data incrementally. Applications must provide their own resource policy when reading untrusted documents, including allocations made by custom Serde visitors.
+There are no size, element-count, nesting-depth, or buffering quotas for schema names and definitions, String and Byte Data payloads, List and Map contents, or cumulative list stream length. The library still checks length-prefix limits imposed by the format, fixed-capacity framing, arithmetic overflow, platform size conversion, and input validity, and uses fallible allocation for owned payloads and unknown-length value buffers. Deeply nested documents can exhaust the call stack; large schemas and values can exhaust memory. Use streaming APIs when processing large data incrementally. Applications must provide their own resource policy when reading untrusted documents, including allocations made by custom Serde visitors.
 
 Single-document readers reject trailing bytes. Confirming EOF may block on a live source, so use them for finite documents and use the list streaming APIs for pipelines. Invalid headers, unsupported flags or versions, malformed schemas, invalid UTF-8, invalid characters, out-of-range variants, and truncated input produce `AsonbError`. Input and I/O errors include a byte offset where available.
 

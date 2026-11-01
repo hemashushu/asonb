@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Hemashushu <hippospark@gmail.com>, All rights reserved.
+// Copyright (c) 2026 Hemashushu <hippospark@gmail.com>, All rights reserved.
 //
 // This Source Code Form is subject to the terms of
 // the Mozilla Public License version 2.0 and additional exceptions.
@@ -34,15 +34,18 @@
 //! streaming stops at its marker.
 //! This crate does not implement ASON text conversion or graph/pointer identity.
 
-mod binary;
+pub mod array;
 pub mod date_time;
+
+mod binary;
 mod de;
 mod error;
 mod schema;
 mod ser;
+mod value;
+
 #[cfg(test)]
 mod test_utils;
-mod value;
 
 extern crate self as asonb;
 

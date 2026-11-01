@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Hemashushu <hippospark@gmail.com>, All rights reserved.
+//
+// This Source Code Form is subject to the terms of
+// the Mozilla Public License version 2.0 and additional exceptions.
+// For more details, see the LICENSE, LICENSE.additional, and CONTRIBUTING files.
+
 use asonb::{
     DocumentSchema, Encoding, Field, Schema, Type, Value, Variant, de_from_reader, de_from_slice,
     ser_to_bytes, ser_value_to_writer,
@@ -215,6 +221,91 @@ fn test_date_time_and_bytes_adapters() {
         de_from_slice::<serde_bytes::ByteBuf>(&ser_to_bytes(&byte_value).unwrap()).unwrap(),
         byte_value
     );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+struct ArrayMappings {
+    default_bytes: [u8; 3],
+    default_values: [i32; 4],
+    #[serde(with = "asonb::array")]
+    byte_list: [u8; 3],
+    #[serde(with = "asonb::array")]
+    large_list: [i32; 40],
+    #[serde(with = "asonb::array")]
+    empty_list: [u16; 0],
+    #[serde(with = "serde_bytes")]
+    byte_data: [u8; 3],
+}
+
+#[test]
+fn test_array_serde_mappings() {
+    let value = ArrayMappings {
+        default_bytes: [1, 2, 3],
+        default_values: [11, 13, 17, 19],
+        byte_list: [4, 5, 6],
+        large_list: std::array::from_fn(|index| index as i32),
+        empty_list: [],
+        byte_data: [7, 8, 9],
+    };
+    let bytes = ser_to_bytes(&value).unwrap();
+    assert_eq!(de_from_slice::<ArrayMappings>(&bytes).unwrap(), value);
+
+    let schema = DocumentSchema::of::<ArrayMappings>().unwrap();
+    let object = schema
+        .references
+        .iter()
+        .find_map(|ty| match ty {
+            Type::Object(_, fields) => Some(fields),
+            _ => None,
+        })
+        .unwrap();
+    let field_type = |name| &object.iter().find(|field| field.name == name).unwrap().ty;
+    assert!(matches!(field_type("default_bytes"), Type::Reference(_)));
+    assert!(matches!(field_type("default_values"), Type::Reference(_)));
+    assert_eq!(
+        field_type("byte_list"),
+        &Type::List(Encoding::Regular, Box::new(Type::U8))
+    );
+    assert_eq!(
+        field_type("large_list"),
+        &Type::List(Encoding::Regular, Box::new(Type::I32))
+    );
+    assert_eq!(
+        field_type("empty_list"),
+        &Type::List(Encoding::Regular, Box::new(Type::U16))
+    );
+    assert_eq!(field_type("byte_data"), &Type::Bytes(Encoding::Regular));
+}
+
+#[test]
+fn test_array_list_adapter_rejects_wrong_length() {
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct TwoItems {
+        #[serde(with = "asonb::array")]
+        values: [i32; 2],
+    }
+
+    for values in [
+        vec![Value::I32(1)],
+        vec![Value::I32(1), Value::I32(2), Value::I32(3)],
+    ] {
+        let schema = DocumentSchema::new(Type::Object(
+            "".into(),
+            vec![Field::new(
+                "values",
+                Type::List(Encoding::Regular, Box::new(Type::I32)),
+            )],
+        ));
+        let mut bytes = Vec::new();
+        ser_value_to_writer(
+            &schema,
+            &Value::Object(vec![Value::List(values)]),
+            &mut bytes,
+        )
+        .unwrap();
+        assert!(de_from_slice::<TwoItems>(&bytes).is_err());
+    }
 }
 
 #[test]

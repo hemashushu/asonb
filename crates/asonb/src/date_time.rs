@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Hemashushu <hippospark@gmail.com>, All rights reserved.
+//
+// This Source Code Form is subject to the terms of
+// the Mozilla Public License version 2.0 and additional exceptions.
+// For more details, see the LICENSE, LICENSE.additional, and CONTRIBUTING files.
+
 //! Explicit chrono adapter for the 16-byte binary DateTime representation.
 //! Use `#[serde(with = "asonb::date_time")]` on a chrono field, or `DateTime`
 //! for a root value. Ordinary chrono Serde strings remain ordinary Strings.
@@ -6,6 +12,15 @@ use crate::{AsonbError, Schema, SchemaBuilder, Type};
 use chrono::{DateTime as ChronoDateTime, FixedOffset};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// Internal Serde newtype marker for routing the chrono adapter through the
+/// DateTime-specific serializer and deserializer paths.
+///
+/// Serde passes this name to `serialize_newtype_struct` and
+/// `deserialize_newtype_struct`; ASONB recognizes it to validate the
+/// `Type::DateTime` schema and interpret the adapter payload as a DateTime,
+/// rather than as an ordinary Serde tuple. The marker is only an in-process
+/// dispatch aid: it is not a schema entry or bytes in an ASONB document. The
+/// document contains the DateTime type definition and its 16-byte payload.
 pub(crate) const MARKER: &str = "$asonb::DateTime";
 
 /// A root-friendly chrono value with a binary rather than text Serde mapping.
