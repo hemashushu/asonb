@@ -2,45 +2,46 @@
 
 _ASONB_ is a binary representation of ASON optimized for efficient storage, access, and transmission.
 
-ASONB supports streaming and limited incremental updates, making it suitable for use cases ranging from simple persistence to data-processing pipelines.
+_ASONB_ supports streaming and limited incremental updates, making it suitable for use cases ranging from simple persistence to data-processing pipelines.
 
-ASONB avoids text-based numeric parsing and repeated object field names in the value area. With a suitable byte-slice API, string and byte payloads can be accessed without copying. Performance and storage savings depend on the data, encoding form, and implementation.
+_ASONB_ avoids text-based numeric parsing and repeated object field names in the value area. With a suitable byte-slice API, string and byte payloads can be accessed without copying. Performance and storage savings depend on the data, encoding form, and implementation.
 
 <!-- @import "[TOC]" {cmd="toc" depthFrom=2 depthTo=4 orderedList=false} -->
 
 <!-- code_chunk_output -->
 
 - [1 Features](#1-features)
-- [2 Library and APIs](#2-library-and-apis)
-  - [2.1 Deserialization and Serialization](#21-deserialization-and-serialization)
-  - [2.2 Streaming Deserialization and Serialization](#22-streaming-deserialization-and-serialization)
-  - [2.3 Rust Type Mappings](#23-rust-type-mappings)
-  - [2.4 Validation and Error Handling](#24-validation-and-error-handling)
-- [3 Quick Reference](#3-quick-reference)
-  - [3.1 Document](#31-document)
-    - [3.1.1 Document Header](#311-document-header)
-    - [3.1.2 Document Schema](#312-document-schema)
-    - [3.1.3 Root Value Binary](#313-root-value-binary)
-  - [3.2 Type Definitions](#32-type-definitions)
-  - [3.3 Encoding](#33-encoding)
-    - [3.3.1 Numeric Types](#331-numeric-types)
-    - [3.3.2 Boolean](#332-boolean)
-    - [3.3.3 Character](#333-character)
-    - [3.3.4 DateTime](#334-datetime)
-    - [3.3.5 String](#335-string)
-    - [3.3.6 Byte Data](#336-byte-data)
-    - [3.3.7 List](#337-list)
-    - [3.3.8 Map](#338-map)
-    - [3.3.9 Tuple](#339-tuple)
-    - [3.3.10 Objects](#3310-objects)
-    - [3.3.11 Enumerations](#3311-enumerations)
-  - [3.4 Reference Types](#34-reference-types)
-    - [3.4.1 Reference Type Definition](#341-reference-type-definition)
-  - [3.5 Conversion to and from ASON](#35-conversion-to-and-from-ason)
-- [4 File Extension and MIME Type](#4-file-extension-and-mime-type)
-- [5 Comparison with Other Binary Serialization Formats](#5-comparison-with-other-binary-serialization-formats)
-- [6 Links](#6-links)
-- [7 License](#7-license)
+- [2 Choosing Between ASON and ASONB](#2-choosing-between-ason-and-asonb)
+- [3 Library and APIs](#3-library-and-apis)
+  - [3.1 Deserialization and Serialization](#31-deserialization-and-serialization)
+  - [3.2 Streaming Deserialization and Serialization](#32-streaming-deserialization-and-serialization)
+  - [3.3 Rust Type Mappings](#33-rust-type-mappings)
+  - [3.4 Validation and Error Handling](#34-validation-and-error-handling)
+- [4 Quick Reference](#4-quick-reference)
+  - [4.1 Document](#41-document)
+    - [4.1.1 Document Header](#411-document-header)
+    - [4.1.2 Document Schema](#412-document-schema)
+    - [4.1.3 Root Value Binary](#413-root-value-binary)
+  - [4.2 Type Definitions](#42-type-definitions)
+  - [4.3 Encoding](#43-encoding)
+    - [4.3.1 Numeric Types](#431-numeric-types)
+    - [4.3.2 Boolean](#432-boolean)
+    - [4.3.3 Character](#433-character)
+    - [4.3.4 DateTime](#434-datetime)
+    - [4.3.5 String](#435-string)
+    - [4.3.6 Byte Data](#436-byte-data)
+    - [4.3.7 List](#437-list)
+    - [4.3.8 Map](#438-map)
+    - [4.3.9 Tuple](#439-tuple)
+    - [4.3.10 Objects](#4310-objects)
+    - [4.3.11 Enumerations](#4311-enumerations)
+  - [4.4 Reference Types](#44-reference-types)
+    - [4.4.1 Reference Type Definition](#441-reference-type-definition)
+  - [4.5 Conversion to and from ASON](#45-conversion-to-and-from-ason)
+- [5 File Extension and MIME Type](#5-file-extension-and-mime-type)
+- [6 Comparison with Other Binary Serialization Formats](#6-comparison-with-other-binary-serialization-formats)
+- [7 Links](#7-links)
+- [8 License](#8-license)
 
 <!-- /code_chunk_output -->
 
@@ -51,11 +52,14 @@ ASONB avoids text-based numeric parsing and repeated object field names in the v
 - Large-data support: Long and multi-chunk encodings support large strings, byte arrays, and lists without requiring the entire value to fit in memory when processed incrementally.
 - Appendable: A root multi-chunk String, Byte Data, or List can be extended by appending chunks.
 
-## 2 Library and APIs
+## 2 Choosing Between ASON and ASONB
+
+- Choose _ASON_, the text format, when people or AI agents need to read or edit the data, such as configuration files or network service API payloads.
+- Choose _ASONB_, the binary format, for inter-process communication (IPC), pipes, or storage I/O when the data does not need to be read or edited directly by people or AI agents. ASONB is also the preferred choice when performance is a priority or data volumes are very large.
+
+## 3 Library and APIs
 
 The Rust [asonb](https://github.com/hemashushu/asonb) crate is the reference implementation.
-
-This repository is a Cargo workspace: `crates/asonb` contains the main library, and `crates/asonb-derive` contains the procedural macro. Run `cargo test --workspace` from the repository root to test both crates.
 
 The crate can be added to a project with:
 
@@ -67,11 +71,11 @@ The APIs use [Serde](https://github.com/serde-rs/serde) (the serialization frame
 
 ```toml
 [dependencies]
-asonb = "3.1"
+asonb = "3.2"
 serde = { version = "1.0", features = ["derive"] }
 ```
 
-### 2.1 Deserialization and Serialization
+### 3.1 Deserialization and Serialization
 
 The Serde-based APIs are intended for typical application data, such as configuration files, messages, and small documents.
 
@@ -134,7 +138,7 @@ let text: &str = asonb::de_from_slice(&bytes).unwrap();
 assert_eq!(text, "Hello");
 ```
 
-### 2.2 Streaming Deserialization and Serialization
+### 3.2 Streaming Deserialization and Serialization
 
 For pipelines, sockets, and incremental producers, the streaming APIs process a list one or more elements at a time without materializing the entire document.
 
@@ -255,7 +259,7 @@ cd target/debug/examples
 
 The stream reader returns an error once and then stops. The writer rejects writes before `start_list()` or after `end_list()` or a failed write. Dropping the writer does not add an end marker. Unlike the single-document reader, the stream reader does not probe beyond an explicit end marker, so it can be used on a live socket.
 
-### 2.3 Rust Type Mappings
+### 3.3 Rust Type Mappings
 
 Primitive types retain their widths. `usize` and `isize` use `u64` and `i64`, respectively, following Serde's mapping. `Vec<T>` and slices use Lists; Rust arrays and tuples use Tuples. Named structs use Objects, and enums use the four Enumeration payload forms. `Option<T>` and `Result<T, E>` retain their variant names. Ownership wrappers such as `Box<T>` serialize their contents, not pointer identities.
 
@@ -293,7 +297,7 @@ Add `chrono` and `serde_bytes` crates to the application's dependencies when usi
 
 For explicit encoding choices, `DocumentSchema`, `Type`, and `Value` expose all long, fixed-capacity, and multi-chunk forms through `ser_value_to_writer`, `de_value_from_reader`, and `de_value_from_slice`. Fixed String slots remain raw bytes; no NUL trimming, padding validation, or logical-length inference is performed. Multi-chunk payloads are joined for owned String/Byte Data targets and cannot be returned as a contiguous borrowed `&str` or byte slice.
 
-### 2.4 Validation and Error Handling
+### 3.4 Validation and Error Handling
 
 Schemas and values have no library-imposed resource quotas. Serialization rejects recursive Rust type schemas before emitting document bytes and checks explicit document schemas for cyclic references. Deserialization checks every document schema definition, including unused definitions, for cyclic references before reading values. Shared, acyclic references are allowed; graph/pointer identity is not supported.
 
@@ -303,9 +307,9 @@ Single-document readers reject trailing bytes. Confirming EOF may block on a liv
 
 Serialization errors may leave a partial document in the writer. The library does not promise transactional writes or rollback; applications requiring atomic persistence should write to a temporary destination and commit it only after serialization succeeds.
 
-## 3 Quick Reference
+## 4 Quick Reference
 
-### 3.1 Document
+### 4.1 Document
 
 An ASONB document consists of an 8-byte document header, followed by the document schema and the root value binary.
 
@@ -319,7 +323,7 @@ Its layout is:
 ]
 ```
 
-#### 3.1.1 Document Header
+#### 4.1.1 Document Header
 
 The document header is an 8-byte metadata block with the following content:
 
@@ -338,7 +342,7 @@ The feature flags byte is reserved and must currently be `0x00`. Future versions
 
 The format version is currently `0x01`. Readers must reject unsupported versions or feature flags rather than assume a compatible layout.
 
-#### 3.1.2 Document Schema
+#### 4.1.2 Document Schema
 
 The schema defines the root value's structure. It contains a table of reusable type definitions followed by the root value type:
 
@@ -350,17 +354,17 @@ The schema defines the root value's structure. It contains a table of reusable t
 ]
 ```
 
-Reference-type definitions avoid repeating schemas, such as those for Objects, Tuples, and Enumerations. See [Reference Types](#34-reference-types) for details. The count specifies the number of definitions, not their total byte length.
+Reference-type definitions avoid repeating schemas, such as those for Objects, Tuples, and Enumerations. See [Reference Types](#44-reference-types) for details. The count specifies the number of definitions, not their total byte length.
 
 The root value type, together with any definitions it references, describes the document's single root value.
 
 Note that names in the schema use regular String value encoding: a `u32` byte length followed by UTF-8 bytes, with no String type-class byte or null terminator.
 
-#### 3.1.3 Root Value Binary
+#### 4.1.3 Root Value Binary
 
-The root value bytes immediately follow the schema. Their layout is determined by the root value type, as described in [Encoding](#33-encoding).
+The root value bytes immediately follow the schema. Their layout is determined by the root value type, as described in [Encoding](#43-encoding).
 
-### 3.2 Type Definitions
+### 4.2 Type Definitions
 
 ASONB represents ASON's primitive and compound value types, including numbers, Booleans, Strings, Lists, Maps, Objects, Tuples, and Enumerations.
 
@@ -410,7 +414,7 @@ The size indicator is the base-2 logarithm of the width in bits: `0x3` means `2^
 
 String, Byte Data, and compound type definitions are described alongside their value encodings below.
 
-### 3.3 Encoding
+### 4.3 Encoding
 
 All integers and IEEE 754 floating-point bit patterns are stored in little-endian byte order. Strings use UTF-8. Values are concatenated without implicit alignment or padding.
 
@@ -422,7 +426,7 @@ EOF may replace an end marker only for a root multi-chunk value. EOF within a le
 
 Lengths and counts must be checked for overflow before calculating offsets or allocating storage. Applications processing untrusted documents should enforce resource limits appropriate to their environment; the Rust library imposes no schema or value resource quotas.
 
-#### 3.3.1 Numeric Types
+#### 4.3.1 Numeric Types
 
 The type determines the encoded width. For example, `i32` occupies four bytes and `f64` occupies eight. Signed integers use two's-complement representation; floating-point values use IEEE 754 binary32 or binary64.
 
@@ -452,11 +456,11 @@ The following complete document contains the `i32` value `0x42`:
 ]
 ```
 
-#### 3.3.2 Boolean
+#### 4.3.2 Boolean
 
 Boolean values occupy one byte, encoded as `i8`: `0x00` means `false`, and any nonzero byte means `true`. Writers should use `0x01` for `true`.
 
-#### 3.3.3 Character
+#### 4.3.3 Character
 
 Character values are encoded as Unicode scalar values stored in little-endian `u32` integers.
 
@@ -464,7 +468,7 @@ For example, `'B'` (U+0042) is encoded as `[0x42, 0x00, 0x00, 0x00]`, and `'文'
 
 Decoders must reject values greater than `0x10FFFF` and values in the surrogate range `0xD800`–`0xDFFF`.
 
-#### 3.3.4 DateTime
+#### 4.3.4 DateTime
 
 DateTime values occupy 16 bytes: a timestamp, a fractional second, and a UTC offset.
 
@@ -480,9 +484,9 @@ The fields are:
 
 - UTC offset (`i32`, 4 bytes): the offset in seconds. A positive value means local time is ahead of UTC; for example, `+08:00` is `28_800`. The timestamp already represents a UTC-based instant, so this offset must not be subtracted from it again. UTC uses zero. The field preserves a numeric offset, not a named time zone such as `Asia/Shanghai`.
 
-Conversion to ASON must respect the DateTime syntax and range supported by the ASON standard; see [Conversion to and from ASON](#35-conversion-to-and-from-ason).
+Conversion to ASON must respect the DateTime syntax and range supported by the ASON standard; see [Conversion to and from ASON](#45-conversion-to-and-from-ason).
 
-#### 3.3.5 String
+#### 4.3.5 String
 
 Strings have three encoding forms: regular, fixed-capacity, and multi-chunk. The regular and fixed-capacity forms also have long variants with `u64` lengths or capacities.
 
@@ -562,7 +566,7 @@ Prefer the regular form unless the byte length may exceed `2^32 - 1`.
 
 Fixed-capacity Strings reserve a fixed number of bytes, specified as a `u32` in the type definition. The value occupies exactly that many bytes, with no length prefix or null terminator. Applications determine the logical string length and how unused bytes are filled or interpreted.
 
-This form follows the low-level conventions described in [Encoding](#33-encoding), rather than defining a general-purpose string representation with a recoverable content length.
+This form follows the low-level conventions described in [Encoding](#43-encoding), rather than defining a general-purpose string representation with a recoverable content length.
 
 The following complete document reserves eight bytes. The application stores `"Hello"` and fills the remaining bytes with zeros:
 
@@ -597,7 +601,7 @@ Long fixed-capacity Strings use a `u64` capacity in the type definition instead 
 
 Multi-chunk Strings support incremental production when the total length is not known in advance.
 
-Each nonempty chunk uses the regular String encoding. A zero length ends the value. The shared end-marker and EOF rules are described in [Encoding](#33-encoding).
+Each nonempty chunk uses the regular String encoding. A zero length ends the value. The shared end-marker and EOF rules are described in [Encoding](#43-encoding).
 
 The value layout is:
 
@@ -631,7 +635,7 @@ For example, the String `"HelloWorld"` can be written in two chunks, `"Hello"` a
 ]
 ```
 
-#### 3.3.6 Byte Data
+#### 4.3.6 Byte Data
 
 Byte Data stores arbitrary byte sequences. It uses the same framing as String, but requires no UTF-8 validation.
 
@@ -677,7 +681,7 @@ Fixed-capacity Byte Data occupies exactly the specified number of bytes. Its log
 ]
 ```
 
-Multi-chunk Byte Data uses nonempty, `u32`-length-prefixed chunks and the shared end-marker rules in [Encoding](#33-encoding). For example, six bytes can be written in two chunks:
+Multi-chunk Byte Data uses nonempty, `u32`-length-prefixed chunks and the shared end-marker rules in [Encoding](#43-encoding). For example, six bytes can be written in two chunks:
 
 ```text
 [
@@ -696,7 +700,7 @@ Multi-chunk Byte Data uses nonempty, `u32`-length-prefixed chunks and the shared
 ]
 ```
 
-#### 3.3.7 List
+#### 4.3.7 List
 
 A List is a sequence of elements with the same type. The element type is part of the List's type definition.
 
@@ -771,7 +775,7 @@ Each chunk starts with its element count. The value encoding is:
 ]
 ```
 
-The end marker is optional only for a root multi-chunk List at EOF, as described in [Encoding](#33-encoding).
+The end marker is optional only for a root multi-chunk List at EOF, as described in [Encoding](#43-encoding).
 
 Fixed-capacity Lists store exactly the capacity's number of element encodings, without a value-area count. Applications decide which slots are logically used and what values occupy unused slots; ASONB defines no default padding value. The encoded byte size is fixed only when the element type also has a fixed encoded size.
 
@@ -820,7 +824,7 @@ Using application-defined zero padding, its value encoding is:
 
 Use regular or multi-chunk Lists for general-purpose serialization; the fixed-capacity form requires application-specific conventions.
 
-#### 3.3.8 Map
+#### 4.3.8 Map
 
 A Map is a sequence of key-value pairs. Both keys and values are ASONB values; keys are often Strings.
 
@@ -880,7 +884,7 @@ Its value encoding is:
 
 The wire format records pairs in sequence. An unordered application map may not preserve that order, so applications that need order-preserving ASON conversion must use an ordered representation. Duplicate-key handling is an application-level policy; conversion must follow the ASON standard.
 
-#### 3.3.9 Tuple
+#### 4.3.9 Tuple
 
 A Tuple has a fixed number of ordered elements, each of which may have a different type.
 
@@ -935,7 +939,7 @@ Its value encoding is:
 ]
 ```
 
-#### 3.3.10 Objects
+#### 4.3.10 Objects
 
 An Object has a fixed set of named fields whose types and order are defined in the schema.
 
@@ -1012,7 +1016,7 @@ Its value encoding is:
 
 > Object values use the concatenated field encodings with no implicit padding. Fixed-width fields therefore have predictable byte offsets, but these offsets need not satisfy native alignment requirements. Memory mapping does not make the bytes a native Rust or C struct: access must account for alignment, little-endian byte order, and value validation. Variable-width fields require scanning or an external index to locate subsequent fields.
 
-#### 3.3.11 Enumerations
+#### 4.3.11 Enumerations
 
 An Enumeration defines a set of named variants, each with its own payload shape.
 
@@ -1093,7 +1097,7 @@ The value encoding of `Option::Some(0x42)` is:
 ]
 ```
 
-### 3.4 Reference Types
+### 4.4 Reference Types
 
 Reference types allow schemas to reuse type definitions, including those for Objects, Tuples, and Enumerations. Each table entry receives a zero-based index in definition order.
 
@@ -1101,7 +1105,7 @@ A type reference is a schema abbreviation, not a pointer or shared value. Its va
 
 The table is optional, even when complex types are defined inline. An empty table has a count of zero. All reference indices must be less than the table count. Forward references may reuse later definitions, but reference dependencies must be acyclic; recursive or mutually recursive type definitions are not supported.
 
-#### 3.4.1 Reference Type Definition
+#### 4.4.1 Reference Type Definition
 
 Each entry in the reference-type table is a complete type definition. Any supported type can be stored in the table and referenced using `[0xC0, index in u32]`.
 
@@ -1167,7 +1171,7 @@ The `address` field uses `[0xC0, 0x00, 0x00, 0x00, 0x00]` to reuse the schema at
 
 Note that this example shows only the reference-type table; a complete document also needs a header, a root value type, and the root value bytes.
 
-### 3.5 Conversion to and from ASON
+### 4.5 Conversion to and from ASON
 
 The [ASON standard](https://github.com/hemashushu/ason/blob/main/docs/specification.md) governs conversion between ASON text and ASONB. The binary format does not extend ASON's text syntax or relax its value constraints.
 
@@ -1177,11 +1181,11 @@ When converting to ASON, values must be representable under the applicable ASON 
 
 Fixed-capacity values require application-defined interpretation before conversion, including how to identify logical content and unused slots. ASONB does not impose those low-level conventions.
 
-## 4 File Extension and MIME Type
+## 5 File Extension and MIME Type
 
 The file extension for ASONB documents is `.asonb`, and the MIME type is `application/asonb`.
 
-## 5 Comparison with Other Binary Serialization Formats
+## 6 Comparison with Other Binary Serialization Formats
 
 These formats make different trade-offs; none is uniformly smaller or faster for every workload.
 
@@ -1195,11 +1199,11 @@ These formats make different trade-offs; none is uniformly smaller or faster for
 
 ASONB's focus is schema-described ASON values, forward-only streaming, and predictable offsets for fixed-width layouts. Variable-width layouts still require scanning or an external index. Storage size, access speed, and conversion cost should be compared using representative data and implementations rather than inferred from the format alone.
 
-## 6 Links
+## 7 Links
 
 - [ASON Specification](https://github.com/hemashushu/ason/blob/main/docs/specification.md)
-- [ASON Rust Library](https://github.com/hemashushu/ason)
+- [ASON Library (Rust)](https://github.com/hemashushu/ason)
 
-## 7 License
+## 8 License
 
 This project is licensed under the MPL 2.0 License with additional terms. See [LICENSE](./LICENSE) and [LICENSE.additional](./LICENSE.additional).

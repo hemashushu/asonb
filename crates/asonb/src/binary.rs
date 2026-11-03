@@ -64,12 +64,30 @@ pub(crate) trait Input<'de> {
     }
 
     fn header(&mut self) -> Result<(), AsonbError> {
-        let header = self.exact::<8>()?;
-        if header != HEADER {
-            return Err(AsonbError::MessageWithOffset(
-                "Invalid header, unsupported flags, or unsupported version.".into(),
-                0,
-            ));
+        for (index, expected) in HEADER.iter().enumerate() {
+            let offset = self.offset();
+            let byte = self.byte()?.ok_or_else(|| {
+                AsonbError::MessageWithOffset(
+                    if index == 0 {
+                        "Expected an ASONB document, but the input is empty.".into()
+                    } else {
+                        "Incomplete ASONB header: the input ended before the header was complete."
+                            .into()
+                    },
+                    offset,
+                )
+            })?;
+            if byte != *expected {
+                let message = match index {
+                    6 => format!(
+                        "Unsupported ASONB feature flags: 0x{byte:02X}; expected 0x00."
+                    ),
+                    7 => format!("Unsupported ASONB version: {byte}; expected version 1."),
+                    _ => "Expected an ASONB document, but the input does not match the ASONB signature."
+                        .into(),
+                };
+                return Err(AsonbError::MessageWithOffset(message, offset));
+            }
         }
         Ok(())
     }
@@ -242,16 +260,52 @@ mod tests {
     #[test]
     fn test_header_and_truncation() {
         for end in 0..HEADER.len() {
-            assert!(matches!(
-                SliceInput::new(&HEADER[..end]).header(),
-                Err(AsonbError::UnexpectedEndOfDocument(_))
-            ));
+            let message = if end == 0 {
+                "Expected an ASONB document, but the input is empty."
+            } else {
+                "Incomplete ASONB header: the input ended before the header was complete."
+            };
+            assert_header_error(&HEADER[..end], message, end as u64);
         }
         SliceInput::new(&HEADER).header().unwrap();
         for index in 0..HEADER.len() {
             let mut bytes = HEADER;
             bytes[index] ^= 1;
-            assert!(SliceInput::new(&bytes).header().is_err());
+            let message = match index {
+                6 => "Unsupported ASONB feature flags: 0x01; expected 0x00.",
+                7 => "Unsupported ASONB version: 0; expected version 1.",
+                _ => {
+                    "Expected an ASONB document, but the input does not match the ASONB signature."
+                }
+            };
+            assert_header_error(&bytes, message, index as u64);
+        }
+    }
+
+    fn assert_header_error(bytes: &[u8], message: &str, offset: u64) {
+        let expected = AsonbError::MessageWithOffset(message.into(), offset);
+        assert_eq!(SliceInput::new(bytes).header().unwrap_err(), expected);
+        assert_eq!(ReaderInput::new(bytes).header().unwrap_err(), expected);
+        assert_eq!(crate::de_from_slice::<u8>(bytes).unwrap_err(), expected);
+        assert_eq!(crate::de_from_reader::<u8, _>(bytes).unwrap_err(), expected);
+        assert_eq!(
+            crate::list_stream_reader::<u8, _>(bytes).err().unwrap(),
+            expected
+        );
+        assert_eq!(
+            expected.to_string(),
+            format!("{message} (byte offset {offset})")
+        );
+    }
+
+    #[test]
+    fn test_non_asonb_header() {
+        for bytes in [b"x".as_slice(), b"{\"name\": \"foo\"}", b"\x00JSON"] {
+            assert_header_error(
+                bytes,
+                "Expected an ASONB document, but the input does not match the ASONB signature.",
+                if bytes[0] == 0 { 1 } else { 0 },
+            );
         }
     }
 

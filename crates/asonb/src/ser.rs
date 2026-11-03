@@ -30,6 +30,15 @@ pub fn ser_to_bytes<T: Serialize + Schema + ?Sized>(value: &T) -> Result<Vec<u8>
     Ok(bytes)
 }
 
+pub fn list_stream_writer<T: Schema, W: Write>(writer: &mut W) -> ListStreamWriter<'_, W, T> {
+    ListStreamWriter {
+        writer,
+        schema: None,
+        state: StreamState::NotStarted,
+        marker: PhantomData,
+    }
+}
+
 /// A schema-guided Serde writer. Child serializers borrow the same output,
 /// but have their own type and nesting state, so nested containers do not
 /// overwrite the framing state of their parents.
@@ -495,15 +504,6 @@ pub struct ListStreamWriter<'a, W: Write, T> {
     schema: Option<DocumentSchema>,
     state: StreamState,
     marker: PhantomData<fn(&T)>,
-}
-
-pub fn list_stream_writer<T: Schema, W: Write>(writer: &mut W) -> ListStreamWriter<'_, W, T> {
-    ListStreamWriter {
-        writer,
-        schema: None,
-        state: StreamState::NotStarted,
-        marker: PhantomData,
-    }
 }
 
 impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {

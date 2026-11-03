@@ -30,6 +30,27 @@ pub fn de_from_slice<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, As
     read_document(&mut SliceInput::new(bytes))
 }
 
+pub fn list_stream_reader<T: de::DeserializeOwned, R: Read>(
+    reader: R,
+) -> Result<ListStreamReader<T, R>, AsonbError> {
+    let mut input = ReaderInput::new(reader);
+    input.header()?;
+    let schema = DocumentSchema::read(&mut input)?;
+    let Type::List(Encoding::MultiChunk, item) = schema.resolve(schema.root.clone())? else {
+        return Err(AsonbError::Message(
+            "List streaming requires a multi-chunk root List.".into(),
+        ));
+    };
+    Ok(ListStreamReader {
+        input,
+        schema,
+        item: *item,
+        remaining: 0,
+        finished: false,
+        marker: PhantomData,
+    })
+}
+
 fn read_document<'de, T: Deserialize<'de>, I: Input<'de>>(input: &mut I) -> Result<T, AsonbError> {
     input.header()?;
     let schema = DocumentSchema::read(input)?;
@@ -530,26 +551,7 @@ pub struct ListStreamReader<T, R: Read> {
     finished: bool,
     marker: PhantomData<fn() -> T>,
 }
-pub fn list_stream_reader<T: de::DeserializeOwned, R: Read>(
-    reader: R,
-) -> Result<ListStreamReader<T, R>, AsonbError> {
-    let mut input = ReaderInput::new(reader);
-    input.header()?;
-    let schema = DocumentSchema::read(&mut input)?;
-    let Type::List(Encoding::MultiChunk, item) = schema.resolve(schema.root.clone())? else {
-        return Err(AsonbError::Message(
-            "List streaming requires a multi-chunk root List.".into(),
-        ));
-    };
-    Ok(ListStreamReader {
-        input,
-        schema,
-        item: *item,
-        remaining: 0,
-        finished: false,
-        marker: PhantomData,
-    })
-}
+
 impl<T: de::DeserializeOwned, R: Read> Iterator for ListStreamReader<T, R> {
     type Item = Result<T, AsonbError>;
     fn next(&mut self) -> Option<Self::Item> {
