@@ -616,13 +616,13 @@ mod tests {
         let variants = vec![
             Variant::Unit("A".into()),
             Variant::Newtype("B".into(), Type::I8),
-            Variant::Tuple("C".into(), vec![Type::Bool]),
+            Variant::Tuple("C".into(), vec![Type::Bool, Type::I32]),
             Variant::Struct("D".into(), vec![crate::Field::new("x", Type::Char)]),
         ];
         for (index, payload) in [
             Value::Tuple(vec![]),
             Value::I8(-1),
-            Value::Tuple(vec![Value::Bool(true)]),
+            Value::Tuple(vec![Value::Bool(true), Value::I32(42)]),
             Value::Object(vec![Value::Char('\u{10ffff}')]),
         ]
         .into_iter()

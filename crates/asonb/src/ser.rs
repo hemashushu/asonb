@@ -336,10 +336,10 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
         value.serialize(&mut Serializer::new(self.writer, self.schema, ty))
     }
     fn serialize_unit(self) -> Result<(), AsonbError> {
-        self.scalar(Value::Tuple(vec![]))
+        Err(AsonbError::Message("Unit is unsupported.".into()))
     }
     fn serialize_unit_struct(self, _name: &'static str) -> Result<(), AsonbError> {
-        self.scalar(Value::Object(vec![]))
+        Err(AsonbError::Message("Unit structs are unsupported.".into()))
     }
     fn serialize_unit_variant(
         self,
@@ -361,7 +361,9 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
             }
             value.serialize(self)
         } else {
-            value.serialize(self)
+            Err(AsonbError::Message(
+                "Newtype structs are unsupported.".into(),
+            ))
         }
     }
     fn serialize_newtype_variant<T: Serialize + ?Sized>(
@@ -391,9 +393,9 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
     fn serialize_tuple_struct(
         self,
         _name: &'static str,
-        length: usize,
+        _length: usize,
     ) -> Result<Self::SerializeTupleStruct, AsonbError> {
-        self.serialize_tuple(length)
+        Err(AsonbError::Message("Tuple structs are unsupported.".into()))
     }
     fn serialize_tuple_variant(
         self,

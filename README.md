@@ -16,7 +16,6 @@ _ASONB_ avoids text-based numeric parsing and repeated object field names in the
   - [3.1 Deserialization and Serialization](#31-deserialization-and-serialization)
   - [3.2 Streaming Deserialization and Serialization](#32-streaming-deserialization-and-serialization)
   - [3.3 Rust Type Mappings](#33-rust-type-mappings)
-  - [3.4 Validation and Error Handling](#34-validation-and-error-handling)
 - [4 Quick Reference](#4-quick-reference)
   - [4.1 Document](#41-document)
     - [4.1.1 Document Header](#411-document-header)
@@ -263,20 +262,25 @@ The stream reader returns an error once and then stops. The writer rejects write
 
 Primitive types retain their widths. `usize` and `isize` use `u64` and `i64`, respectively, following Serde's mapping. `Vec<T>` and slices use Lists; Rust arrays and tuples use Tuples. Named structs use Objects, and enums use the four Enumeration payload forms. `Option<T>` and `Result<T, E>` retain their variant names. Ownership wrappers such as `Box<T>` serialize their contents, not pointer identities.
 
-Binary-only mappings also support `()` as an empty Tuple, unit structs as empty Objects, tuple structs as Tuples, and newtype or transparent structs as their payload. These mappings do not imply that the values can be converted to ASON text.
+The following Rust types are not supported:
+
+- Unit / empty tuples (`()`).
+- Unit structs, such as `struct Foo;`.
+- Newtype structs, such as `struct Width(u32);`.
+- Tuple structs, such as `struct RGB(u8, u8, u8);`.
+
+Empty named structs (including structs with no serialized fields) are also unsupported because Objects must not be empty. Zero-length arrays cannot use the default Tuple mapping; use a List or Byte Data adapter instead. Enum unit variants and single-value variants remain supported. Explicit Serde representations such as `#[serde(transparent)]` on a named-field struct use the represented field's type rather than an Object. The library's DateTime wrapper is supported through its dedicated adapter.
 
 `Vec<u8>` is a List of `u8`, not Byte Data. Use `serde_bytes::Bytes`, `serde_bytes::ByteBuf`, or `#[serde(with = "serde_bytes")]` to select Byte Data.
 
-Rust fixed-size arrays `[T; N]` use Tuples by default, with one element type per position. For a field that should use a List instead, apply `#[serde(with = "asonb::array")]`. This adapter supports any `N`, including zero and lengths greater than 32, and deserialization requires exactly `N` elements. For `[u8; N]`, `#[serde(with = "serde_bytes")]` selects Byte Data; this is separate from both the default Tuple mapping and the `asonb::array` List mapping. `Vec<u8>` remains a List of `u8` unless annotated with `serde_bytes`.
+Rust fixed-size arrays `[T; N]` use Tuples by default, with one element type per position. For a field that should use a List instead, apply `#[serde(with = "asonb::array")]`. For `[u8; N]`, apply `#[serde(with = "serde_bytes")]` to select Byte Data.
 
 | Rust field type                 | Default mapping      | `#[serde(with = "serde_bytes")]` | `#[serde(with = "asonb::array")]` |
 |---------------------------------|----------------------|----------------------------------|------------------------------------|
 | `[u8; N]`                       | Tuple of `u8` values | Byte Data     | List of `u8` values |
 | `[T; N]`, where `T` is not `u8` | Tuple of `T` values  | Not supported | List of `T` values  |
 
-The default Tuple mapping follows Serde's array implementations. ASONB's binary format supports empty Tuples; this binary-only mapping does not imply that the value can be converted to ASON text.
-
-For chrono values, use `asonb::date_time::DateTime` at the root or the field adapter below. It preserves timestamp, nanoseconds, and numeric offset directly, including offsets with second precision. Ordinary chrono serialization uses strings and must not be confused with this binary mapping.
+For chrono values, use `asonb::date_time::DateTime` at the root or the field adapter `asonb::date_time` below. It preserves timestamp, nanoseconds, and numeric offset directly, including offsets with second precision. Ordinary chrono serialization uses strings and must not be confused with this binary mapping.
 
 ```rust
 use asonb::Schema;
@@ -292,20 +296,6 @@ struct Record {
 ```
 
 Add `chrono` and `serde_bytes` crates to the application's dependencies when using these field types and adapters. Valid wire DateTime values outside chrono's range remain accessible through the low-level `Value::DateTime` representation. Leap-second nanoseconds are rejected because ASONB requires nanoseconds below one billion.
-
-`Schema` supports generics, lifetimes, const generics, Serde renaming, skipped fields, and the documented adapters. Value-dependent `skip_serializing_if`, `flatten`, and internally tagged, adjacently tagged, or untagged enums are rejected because they do not match this static schema mapping. Other custom serializers require an explicit `#[asonb(schema_with = "path")]` schema function accepting `&mut SchemaBuilder` and returning `Result<Type, AsonbError>`. Runtime serialization still checks the emitted shape against that schema. `deserialize_any` is not supported; use a concrete target type or the low-level value APIs.
-
-For explicit encoding choices, `DocumentSchema`, `Type`, and `Value` expose all long, fixed-capacity, and multi-chunk forms through `ser_value_to_writer`, `de_value_from_reader`, and `de_value_from_slice`. Fixed String slots remain raw bytes; no NUL trimming, padding validation, or logical-length inference is performed. Multi-chunk payloads are joined for owned String/Byte Data targets and cannot be returned as a contiguous borrowed `&str` or byte slice.
-
-### 3.4 Validation and Error Handling
-
-Schemas and values have no library-imposed resource quotas. Serialization rejects recursive Rust type schemas before emitting document bytes and checks explicit document schemas for cyclic references. Deserialization checks every document schema definition, including unused definitions, for cyclic references before reading values. Shared, acyclic references are allowed; graph/pointer identity is not supported.
-
-There are no size, element-count, nesting-depth, or buffering quotas for schema names and definitions, String and Byte Data payloads, List and Map contents, or cumulative list stream length. The library still checks length-prefix limits imposed by the format, fixed-capacity framing, arithmetic overflow, platform size conversion, and input validity, and uses fallible allocation for owned payloads and unknown-length value buffers. Deeply nested documents can exhaust the call stack; large schemas and values can exhaust memory. Use streaming APIs when processing large data incrementally. Applications must provide their own resource policy when reading untrusted documents, including allocations made by custom Serde visitors.
-
-Single-document readers reject trailing bytes. Confirming EOF may block on a live source, so use them for finite documents and use the list streaming APIs for pipelines. Invalid headers, unsupported flags or versions, malformed schemas, invalid UTF-8, invalid characters, out-of-range variants, and truncated input produce `AsonbError`. Input and I/O errors include a byte offset where available.
-
-Serialization errors may leave a partial document in the writer. The library does not promise transactional writes or rollback; applications requiring atomic persistence should write to a temporary destination and commit it only after serialization succeeds.
 
 ## 4 Quick Reference
 
@@ -368,6 +358,15 @@ The root value bytes immediately follow the schema. Their layout is determined b
 
 ASONB represents ASON's primitive and compound value types, including numbers, Booleans, Strings, Lists, Maps, Objects, Tuples, and Enumerations.
 
+To align with ASON, the following constraints apply:
+
+- A Tuple must contain at least one element.
+- An Object must contain at least one key-value pair, and its keys must be unique. This also applies to object-like variant payloads.
+- A tuple-like variant must contain at least two elements. Zero-element and one-element tuple-like variants are invalid; in textual ASON, the one-element form conflicts with a single-value variant. A single-value variant may itself contain a nonempty Tuple.
+- Map keys (names) must be unique. The library does not check Map key uniqueness; applications must enforce it. Duplicate Object keys are already rejected by schema validation.
+
+Lists and Maps may be empty. Schema validation checks these structural constraints even for unused reference definitions and unselected variants.
+
 Each type definition starts with a one-byte type class, followed by any type-specific bytes:
 
 ```text
@@ -418,13 +417,11 @@ String, Byte Data, and compound type definitions are described alongside their v
 
 All integers and IEEE 754 floating-point bit patterns are stored in little-endian byte order. Strings use UTF-8. Values are concatenated without implicit alignment or padding.
 
-Fixed-capacity String, Byte Data, and List encodings are intended for low-level systems that need reserved storage or predictable layouts. ASONB specifies their capacities and framing, but does not prescribe logical content lengths, padding values, or how applications distinguish content from unused capacity. The zero-filled examples below illustrate an application convention, not a format requirement. Fixed-capacity Lists still contain the number of element encodings specified by their capacity, allowing readers to locate subsequent values.
+Fixed-capacity String, Byte Data, and List encodings are intended for low-level systems that need reserved storage or predictable layouts. ASONB specifies their capacities and framing, but does not prescribe logical content lengths, padding values, or how applications distinguish content from unused capacity. The zero-filled examples below illustrate an application convention, not a format requirement.
 
 Multi-chunk String, Byte Data, and List values use a zero chunk length (`0x00 0x00 0x00 0x00`) as an end marker, not as an empty data chunk. The marker occupies exactly four bytes and has no payload. An empty multi-chunk value consists of this marker, or immediate EOF if it is the root value.
 
 EOF may replace an end marker only for a root multi-chunk value. EOF within a length prefix, payload, or incomplete list element is a truncation error. Nested values require an explicit end marker. A live source must end or supply the marker before a reader can conclude that the root value is complete.
-
-Lengths and counts must be checked for overflow before calculating offsets or allocating storage. Applications processing untrusted documents should enforce resource limits appropriate to their environment; the Rust library imposes no schema or value resource quotas.
 
 #### 4.3.1 Numeric Types
 

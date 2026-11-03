@@ -342,27 +342,93 @@ fn test_nested_collections_and_binary_rust_forms() {
         .unwrap(),
         value
     );
-    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+}
+
+#[test]
+fn test_unsupported_rust_forms() {
+    #[derive(Debug, Serialize, Deserialize)]
     struct Unit;
-    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    #[derive(Debug, Serialize, Deserialize)]
     struct Newtype(i32);
-    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    #[derive(Debug, Serialize, Deserialize)]
     struct Tuple(i32, String);
-    assert_eq!(
-        de_from_slice::<()>(&ser_to_bytes(&()).unwrap()).unwrap(),
-        ()
+    impl Schema for Unit {
+        fn schema(_: &mut asonb::SchemaBuilder) -> Result<Type, asonb::AsonbError> {
+            Ok(Type::I32)
+        }
+    }
+    impl Schema for Newtype {
+        fn schema(_: &mut asonb::SchemaBuilder) -> Result<Type, asonb::AsonbError> {
+            Ok(Type::I32)
+        }
+    }
+    impl Schema for Tuple {
+        fn schema(builder: &mut asonb::SchemaBuilder) -> Result<Type, asonb::AsonbError> {
+            <(i32, String)>::schema(builder)
+        }
+    }
+    assert!(ser_to_bytes(&()).is_err());
+    assert!(
+        ser_to_bytes(&Unit)
+            .unwrap_err()
+            .to_string()
+            .contains("Unit structs")
     );
-    assert_eq!(
-        de_from_slice::<Unit>(&ser_to_bytes(&Unit).unwrap()).unwrap(),
-        Unit
+    assert!(
+        ser_to_bytes(&Newtype(1))
+            .unwrap_err()
+            .to_string()
+            .contains("Newtype structs")
     );
-    assert_eq!(
-        de_from_slice::<Newtype>(&ser_to_bytes(&Newtype(1)).unwrap()).unwrap(),
-        Newtype(1)
+    assert!(
+        ser_to_bytes(&Tuple(1, "a".into()))
+            .unwrap_err()
+            .to_string()
+            .contains("Tuple structs")
     );
+    let scalar = ser_to_bytes(&1i32).unwrap();
+    let tuple = ser_to_bytes(&(1i32, "a")).unwrap();
+    for error in [
+        de_from_slice::<()>(&scalar).unwrap_err(),
+        de_from_slice::<Unit>(&scalar).unwrap_err(),
+        de_from_slice::<Newtype>(&scalar).unwrap_err(),
+        de_from_slice::<Tuple>(&tuple).unwrap_err(),
+        de_from_reader::<(), _>(scalar.as_slice()).unwrap_err(),
+        de_from_reader::<Unit, _>(scalar.as_slice()).unwrap_err(),
+        de_from_reader::<Newtype, _>(scalar.as_slice()).unwrap_err(),
+        de_from_reader::<Tuple, _>(tuple.as_slice()).unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("unsupported"));
+    }
+    #[derive(Serialize, Schema)]
+    struct Empty {}
+    #[derive(Serialize, Schema)]
+    struct Skipped {
+        #[serde(skip)]
+        _value: i32,
+    }
+    #[derive(Serialize, Schema)]
+    enum EmptyVariant {
+        Empty {},
+    }
+    assert!(ser_to_bytes(&Empty {}).is_err());
+    assert!(ser_to_bytes(&Skipped { _value: 1 }).is_err());
+    assert!(ser_to_bytes(&EmptyVariant::Empty {}).is_err());
+    assert!(ser_to_bytes(&[0i32; 0]).is_err());
+    assert!(ser_to_bytes(&None::<()>).is_err());
+    let one = (42i32,);
     assert_eq!(
-        de_from_slice::<Tuple>(&ser_to_bytes(&Tuple(1, "a".into())).unwrap()).unwrap(),
-        Tuple(1, "a".into())
+        de_from_slice::<(i32,)>(&ser_to_bytes(&one).unwrap()).unwrap(),
+        one
+    );
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    enum SingleTuple {
+        Value((i32,)),
+    }
+    let value = SingleTuple::Value(one);
+    assert_eq!(
+        de_from_slice::<SingleTuple>(&ser_to_bytes(&value).unwrap()).unwrap(),
+        value
     );
 }
 

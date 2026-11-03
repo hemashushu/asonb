@@ -262,6 +262,12 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     }
     let body = match &input.data {
         Data::Struct(data) => {
+            if !matches!(data.fields, Fields::Named(_)) {
+                return Err(syn::Error::new_spanned(
+                    ident,
+                    "unit, newtype, and tuple structs are unsupported by ASONB",
+                ));
+            }
             let parts = fields(&data.fields, attrs.rule.as_deref(), &root)?;
             if attrs.transparent {
                 let active = data
@@ -284,12 +290,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             } else {
                 match &data.fields {
                     Fields::Named(_) => quote!(#root::Type::Object(#name.into(),vec![#(#parts),*])),
-                    Fields::Unnamed(_) if parts.len() == 1 => {
-                        let ty = &parts[0];
-                        quote!(#ty)
-                    }
-                    Fields::Unnamed(_) => quote!(#root::Type::Tuple(vec![#(#parts),*])),
-                    Fields::Unit => quote!(#root::Type::Object(#name.into(),vec![])),
+                    _ => unreachable!(),
                 }
             }
         }
@@ -315,11 +316,17 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 )?;
                 variants.push(match &variant.fields {
                     Fields::Unit => quote!(#root::Variant::Unit(#name.into())),
-                    Fields::Unnamed(_) if parts.len() == 1 => {
+                    Fields::Unnamed(fields) if fields.unnamed.len() == 1 && parts.len() == 1 => {
                         let ty = &parts[0];
                         quote!(#root::Variant::Newtype(#name.into(),#ty))
                     }
                     Fields::Unnamed(_) => {
+                        if parts.len() < 2 {
+                            return Err(syn::Error::new_spanned(
+                                &variant.ident,
+                                "tuple-like variants require at least two serialized elements",
+                            ));
+                        }
                         quote!(#root::Variant::Tuple(#name.into(),vec![#(#parts),*]))
                     }
                     Fields::Named(_) => {

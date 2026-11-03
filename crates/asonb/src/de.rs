@@ -246,21 +246,15 @@ impl<'de, I: Input<'de>> de::Deserializer<'de> for &mut Deserializer<'_, 'de, I>
             _ => Err(self.mismatch("None or Some")),
         }
     }
-    fn deserialize_unit<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, AsonbError> {
-        if self.ty()? != Type::Tuple(vec![]) {
-            return Err(self.mismatch("an empty Tuple"));
-        }
-        visitor.visit_unit()
+    fn deserialize_unit<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value, AsonbError> {
+        Err(AsonbError::Message("Unit is unsupported.".into()))
     }
     fn deserialize_unit_struct<V: Visitor<'de>>(
         self,
         _name: &'static str,
-        visitor: V,
+        _visitor: V,
     ) -> Result<V::Value, AsonbError> {
-        match self.ty()? {
-            Type::Object(_, fields) if fields.is_empty() => visitor.visit_unit(),
-            _ => Err(self.mismatch("an empty Object")),
-        }
+        Err(AsonbError::Message("Unit structs are unsupported.".into()))
     }
     fn deserialize_newtype_struct<V: Visitor<'de>>(
         self,
@@ -272,6 +266,10 @@ impl<'de, I: Input<'de>> de::Deserializer<'de> for &mut Deserializer<'_, 'de, I>
                 return Err(self.mismatch("DateTime"));
             }
             self.ty = Type::Tuple(vec![Type::I64, Type::U32, Type::I32]);
+        } else {
+            return Err(AsonbError::Message(
+                "Newtype structs are unsupported.".into(),
+            ));
         }
         visitor.visit_newtype_struct(self)
     }
@@ -288,10 +286,10 @@ impl<'de, I: Input<'de>> de::Deserializer<'de> for &mut Deserializer<'_, 'de, I>
     fn deserialize_tuple_struct<V: Visitor<'de>>(
         self,
         _name: &'static str,
-        length: usize,
-        visitor: V,
+        _length: usize,
+        _visitor: V,
     ) -> Result<V::Value, AsonbError> {
-        self.deserialize_tuple(length, visitor)
+        Err(AsonbError::Message("Tuple structs are unsupported.".into()))
     }
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, AsonbError> {
         self.mapping(visitor, false)

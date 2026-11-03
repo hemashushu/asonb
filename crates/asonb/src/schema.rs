@@ -170,7 +170,14 @@ impl DocumentSchema {
             }
             Type::List(_, item) => vec![item],
             Type::Map(_, key, value) => vec![key, value],
-            Type::Tuple(items) => items.iter().collect(),
+            Type::Tuple(items) => {
+                if items.is_empty() {
+                    return Err(AsonbError::Message(
+                        "Tuple requires at least one element.".into(),
+                    ));
+                }
+                items.iter().collect()
+            }
             Type::Object(_, fields) => {
                 validate_fields(fields)?;
                 fields.iter().map(|field| &field.ty).collect()
@@ -186,6 +193,11 @@ impl DocumentSchema {
                         Variant::Unit(_) => {}
                         Variant::Newtype(_, ty) => children.push(ty),
                         Variant::Tuple(_, types) => {
+                            if types.len() < 2 {
+                                return Err(AsonbError::Message(
+                                    "Tuple-like variant requires at least two elements.".into(),
+                                ));
+                            }
                             children.extend(types);
                         }
                         Variant::Struct(_, fields) => {
@@ -244,6 +256,11 @@ impl DocumentSchema {
 }
 
 fn validate_fields(fields: &[Field]) -> Result<(), AsonbError> {
+    if fields.is_empty() {
+        return Err(AsonbError::Message(
+            "Object requires at least one field.".into(),
+        ));
+    }
     let mut names = HashSet::new();
     for field in fields {
         if !names.insert(&field.name) {
@@ -623,14 +640,14 @@ mod tests {
             Type::Bool,
             Type::Char,
             Type::DateTime,
-            Type::Tuple(vec![]),
+            Type::Tuple(vec![Type::Bool]),
             Type::Object("".into(), vec![Field::new("a", Type::I32)]),
             Type::Enum(
                 "E".into(),
                 vec![
                     Variant::Unit("A".into()),
                     Variant::Newtype("B".into(), Type::I32),
-                    Variant::Tuple("C".into(), vec![Type::Bool]),
+                    Variant::Tuple("C".into(), vec![Type::Bool, Type::I32]),
                     Variant::Struct("D".into(), vec![Field::new("x", Type::Char)]),
                 ],
             ),
@@ -658,6 +675,55 @@ mod tests {
             for end in 0..bytes.len() {
                 assert!(DocumentSchema::read(&mut SliceInput::new(&bytes[..end])).is_err());
             }
+        }
+    }
+
+    #[test]
+    fn test_container_arity_validation() {
+        for ty in [
+            Type::Tuple(vec![]),
+            Type::Object("Empty".into(), vec![]),
+            Type::Enum("E".into(), vec![Variant::Tuple("Empty".into(), vec![])]),
+            Type::Enum(
+                "E".into(),
+                vec![Variant::Tuple("One".into(), vec![Type::I32])],
+            ),
+            Type::Enum("E".into(), vec![Variant::Struct("Empty".into(), vec![])]),
+        ] {
+            let schema = DocumentSchema::new(ty.clone());
+            let expected = schema.validate().unwrap_err().to_string();
+            let mut output = Vec::new();
+            assert_eq!(
+                crate::ser_value_to_writer(&schema, &crate::Value::I32(1), &mut output)
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+            assert!(output.is_empty());
+            let mut bytes = crate::binary::HEADER.to_vec();
+            schema.write(&mut bytes).unwrap();
+            for error in [
+                crate::de_from_slice::<i32>(&bytes).unwrap_err(),
+                crate::de_from_reader::<i32, _>(bytes.as_slice()).unwrap_err(),
+                crate::de_value_from_slice(&bytes).unwrap_err(),
+                crate::de_value_from_reader(bytes.as_slice()).unwrap_err(),
+            ] {
+                assert_eq!(error.to_string(), expected);
+            }
+
+            let schema = DocumentSchema {
+                references: vec![ty],
+                root: Type::List(Encoding::MultiChunk, Box::new(Type::I32)),
+            };
+            let mut bytes = crate::binary::HEADER.to_vec();
+            schema.write(&mut bytes).unwrap();
+            assert_eq!(
+                crate::list_stream_reader::<i32, _>(bytes.as_slice())
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                expected
+            );
         }
     }
 
