@@ -46,32 +46,16 @@ pub struct Serializer<'a, W: Write> {
     writer: &'a mut W,
     schema: &'a DocumentSchema,
     ty: Type,
-    nanoseconds: bool,
-    utc_offset: bool,
 }
 
 impl<'a, W: Write> Serializer<'a, W> {
     pub(crate) fn new(writer: &'a mut W, schema: &'a DocumentSchema, ty: Type) -> Self {
-        Self {
-            writer,
-            schema,
-            ty,
-            nanoseconds: false,
-            utc_offset: false,
-        }
+        Self { writer, schema, ty }
     }
     fn ty(&self) -> Result<Type, AsonbError> {
         self.schema.resolve(self.ty.clone())
     }
     fn scalar(&mut self, value: Value<'_>) -> Result<(), AsonbError> {
-        if self.utc_offset {
-            let Value::I32(offset) = &value else {
-                return Err(AsonbError::Message("Invalid ASON UTC offset value.".into()));
-            };
-            if !crate::value::is_valid_ason_utc_offset(*offset) {
-                return Err(AsonbError::Message("Invalid ASON UTC offset.".into()));
-            }
-        }
         write_value(self.writer, self.schema, &self.ty, &value)
     }
     fn variant(&mut self, name: &str, form: u8) -> Result<Type, AsonbError> {
@@ -170,7 +154,7 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
                 }
                 Kind::Object(fields)
             }
-            Type::DateTime if length == Some(3) => Kind::DateTime,
+            Type::DateTime if length == Some(1) => Kind::DateTime,
             _ => {
                 return Err(AsonbError::Message(
                     "Container does not match schema.".into(),
@@ -187,21 +171,16 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
         })
     }
 
-    fn child<T: Serialize + ?Sized>(
-        &mut self,
-        ty: Type,
-        value: &T,
-        nanoseconds: bool,
-        utc_offset: bool,
-    ) -> Result<(), AsonbError> {
+    fn child<T: Serialize + ?Sized>(&mut self, ty: Type, value: &T) -> Result<(), AsonbError> {
         let serializer = &mut self.serializer;
         let result = if let Some(buffer) = &mut self.buffer {
             value.serialize(&mut Serializer::new(buffer, serializer.schema, ty))
         } else {
-            let mut child = Serializer::new(serializer.writer, serializer.schema, ty);
-            child.nanoseconds = nanoseconds;
-            child.utc_offset = utc_offset;
-            value.serialize(&mut child)
+            value.serialize(&mut Serializer::new(
+                serializer.writer,
+                serializer.schema,
+                ty,
+            ))
         };
         result?;
         Ok(())
@@ -222,20 +201,11 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
                 .get(self.count)
                 .cloned()
                 .ok_or_else(|| AsonbError::Message("Too many tuple elements.".into()))?,
-            Kind::DateTime => match self.count {
-                0 => Type::I64,
-                1 => Type::U32,
-                2 => Type::I32,
-                _ => return Err(AsonbError::Message("Too many DateTime fields.".into())),
-            },
+            Kind::DateTime if self.count == 0 => Type::I64,
+            Kind::DateTime => return Err(AsonbError::Message("Too many DateTime fields.".into())),
             _ => return Err(AsonbError::Message("Expected a sequence.".into())),
         };
-        self.child(
-            ty,
-            value,
-            matches!(self.kind, Kind::DateTime) && self.count == 1,
-            matches!(self.kind, Kind::DateTime) && self.count == 2,
-        )?;
+        self.child(ty, value)?;
         self.count += 1;
         Ok(())
     }
@@ -253,7 +223,7 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
                 field.name
             )));
         }
-        self.child(field.ty.clone(), value, false, false)?;
+        self.child(field.ty.clone(), value)?;
         self.count += 1;
         Ok(())
     }
@@ -268,7 +238,7 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
         let Kind::Map(_, key, _) = &self.kind else {
             return Err(AsonbError::Message("Expected Map.".into()));
         };
-        self.child(key.clone(), value, false, false)?;
+        self.child(key.clone(), value)?;
         self.pending = true;
         Ok(())
     }
@@ -280,7 +250,7 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
         let Kind::Map(_, _, ty) = &self.kind else {
             return Err(AsonbError::Message("Expected Map.".into()));
         };
-        self.child(ty.clone(), value, false, false)?;
+        self.child(ty.clone(), value)?;
         self.pending = false;
         self.count += 1;
         Ok(())
@@ -325,9 +295,6 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
     type SerializeStructVariant = Compound<'a, 'w, W>;
     serialize_numbers!(serialize_i8,i8,I8;serialize_i16,i16,I16;serialize_i32,i32,I32;serialize_i64,i64,I64;serialize_u8,u8,U8;serialize_u16,u16,U16;serialize_u64,u64,U64;serialize_f32,f32,F32;serialize_f64,f64,F64;serialize_bool,bool,Bool;serialize_char,char,Char);
     fn serialize_u32(self, value: u32) -> Result<(), AsonbError> {
-        if self.nanoseconds && value >= 1_000_000_000 {
-            return Err(AsonbError::Message("Invalid nanoseconds.".into()));
-        }
         self.scalar(Value::U32(value))
     }
     fn serialize_str(self, value: &str) -> Result<(), AsonbError> {

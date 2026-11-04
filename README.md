@@ -280,7 +280,7 @@ Rust fixed-size arrays `[T; N]` use Tuples by default, with one element type per
 | `[u8; N]`                       | Tuple of `u8` values | Byte Data     | List of `u8` values |
 | `[T; N]`, where `T` is not `u8` | Tuple of `T` values  | Not supported | List of `T` values  |
 
-For chrono values, use `asonb::date_time::DateTime` at the root or the field adapter `asonb::date_time` below. It preserves timestamp, nanoseconds, and numeric offset directly. Offsets must be whole-minute values in the range `-23:59` to `+23:59`, as required by ASON. Ordinary chrono serialization uses strings and must not be confused with this binary mapping.
+For chrono values, use `asonb::date_time::DateTime` at the root or the field adapter `asonb::date_time` below. The adapter converts values to UTC Unix timestamps; the original offset is not preserved, and decoded values use `+00:00`. Serialization rejects nonzero nanoseconds and offsets that are not whole-minute values in the range `-23:59` to `+23:59`, as required by ASON. Ordinary chrono serialization uses strings and must not be confused with this binary mapping.
 
 ```rust
 use asonb::Schema;
@@ -295,7 +295,7 @@ struct Record {
 }
 ```
 
-Add `chrono` and `serde_bytes` crates to the application's dependencies when using these field types and adapters. Valid wire DateTime values outside chrono's range remain accessible through the low-level `Value::DateTime` representation. Leap-second nanoseconds are rejected because ASONB requires nanoseconds below one billion.
+Add `chrono` and `serde_bytes` crates to the application's dependencies when using these field types and adapters. Valid wire DateTime timestamps outside chrono's range remain accessible through the low-level `Value::DateTime(i64)` representation.
 
 ## 4 Quick Reference
 
@@ -467,21 +467,15 @@ Decoders must reject values greater than `0x10FFFF` and values in the surrogate 
 
 #### 4.3.4 DateTime
 
-DateTime values occupy 16 bytes: a timestamp, a fractional second, and a UTC offset.
+DateTime values occupy 8 bytes and represent whole seconds since the Unix epoch in UTC.
 
 ```text
-[8-byte timestamp `i64`, 4-byte nanoseconds `u32`, 4-byte timezone offset `i32`]
+[8-byte UTC timestamp `i64`]
 ```
 
-The fields are:
+The timestamp is encoded as a little-endian signed integer. Negative values represent instants before the epoch. When converting an ASON DateTime with a time offset to ASONB, convert the local date and time to UTC first (`UTC = local time - time offset`), then store its Unix timestamp. For example, `d"2024-03-16T16:30:50+08:00"` is stored as the timestamp for `2024-03-16T08:30:50Z`.
 
-- Timestamp (`i64`, 8 bytes): whole seconds since the Unix epoch, `1970-01-01T00:00:00Z`. Negative values represent instants before the epoch.
-
-- Nanoseconds (`u32`, 4 bytes): the fractional second, in `0..=999_999_999`. Decoders must reject larger values. ASONB stores and preserves this field, but ASON DateTime has only whole-second precision, so the field is ignored when converting to ASON and reserved for future design compatibility.
-
-- UTC offset (`i32`, 4 bytes): the offset in seconds. It must be a whole-minute value in the range `-23:59` to `+23:59`, matching ASON DateTime syntax. A positive value means local time is ahead of UTC; for example, `+08:00` is `28_800`. The timestamp already represents a UTC-based instant, so this offset must not be subtracted from it again. UTC uses zero. The field preserves a numeric offset, not a named time zone such as `Asia/Shanghai`.
-
-Conversion to ASON must respect the DateTime syntax and range supported by the ASON standard; see [Conversion to and from ASON](#45-conversion-to-and-from-ason).
+The ASONB value does not preserve the source time offset. When converting back to ASON, represent the timestamp directly as a UTC DateTime with offset `+00:00`. The chrono adapter rejects fractional seconds rather than silently discarding them.
 
 #### 4.3.5 String
 
@@ -1075,7 +1069,7 @@ The [ASON standard](https://github.com/hemashushu/ason/blob/main/docs/specificat
 
 Conversion preserves values when ASON can represent them, but not source formatting, comments, or the choice of binary encoding form. Converting from ASON requires a schema supplied by the application or derived from the value where sufficient type information is available. Empty collections (which may be empty Lists or Maps) that cannot be inferred from context are both mapped to an empty List of `i32`.
 
-When converting DateTime to ASON, timestamp ranges and nanosecond precision that ASON cannot represent are discarded without warning or error. UTC offsets are validated against the ASON DateTime limits.
+DateTime conversion applies an ASON time offset when producing the UTC timestamp. Converting back produces a UTC DateTime with offset `+00:00`; the original offset is not recoverable. The chrono adapter rejects nonzero fractional seconds because ASON DateTime and the ASONB representation both use whole-second precision.
 
 ## 5 File Extension and MIME Type
 

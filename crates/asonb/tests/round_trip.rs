@@ -204,13 +204,21 @@ fn test_date_time_and_bytes_adapters() {
         #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     }
-    let instant = chrono::DateTime::from_timestamp(-1, 500_000_000).unwrap();
+    let instant = chrono::DateTime::from_timestamp(-1, 0).unwrap();
     let value = Record {
         time: instant.with_timezone(&chrono::FixedOffset::east_opt(28_800).unwrap()),
         data: vec![0xff, 0, 1],
     };
     let bytes = ser_to_bytes(&value).unwrap();
-    assert_eq!(de_from_slice::<Record>(&bytes).unwrap(), value);
+    assert_eq!(
+        de_from_slice::<Record>(&bytes).unwrap(),
+        Record {
+            time: value
+                .time
+                .with_timezone(&chrono::FixedOffset::east_opt(0).unwrap()),
+            data: value.data.clone(),
+        }
+    );
     let time = asonb::date_time::DateTime(value.time);
     assert_eq!(
         de_from_slice::<asonb::date_time::DateTime>(&ser_to_bytes(&time).unwrap()).unwrap(),
@@ -443,17 +451,14 @@ fn test_malformed_input() {
         asonb::de_value_from_slice(&bytes),
         Err(asonb::AsonbError::UnexpectedEndOfDocument(_))
     ));
-    for nanos in [1_000_000_000u32, u32::MAX] {
-        let schema = DocumentSchema::new(Type::DateTime);
-        let mut bytes = Vec::new();
-        ser_value_to_writer(&schema, &Value::DateTime(0, 0, 0), &mut bytes).unwrap();
-        bytes[21..25].copy_from_slice(&nanos.to_le_bytes());
-        assert!(de_from_slice::<asonb::date_time::DateTime>(&bytes).is_err());
-        assert!(asonb::de_value_from_slice(&bytes).is_err());
-    }
     let schema = DocumentSchema::new(Type::DateTime);
     let mut bytes = Vec::new();
-    ser_value_to_writer(&schema, &Value::DateTime(i64::MAX, 0, 0), &mut bytes).unwrap();
+    ser_value_to_writer(&schema, &Value::DateTime(0), &mut bytes).unwrap();
+    assert!(de_from_slice::<asonb::date_time::DateTime>(&bytes).is_ok());
+    assert!(asonb::de_value_from_slice(&bytes[..20]).is_err());
+    let schema = DocumentSchema::new(Type::DateTime);
+    let mut bytes = Vec::new();
+    ser_value_to_writer(&schema, &Value::DateTime(i64::MAX), &mut bytes).unwrap();
     assert!(asonb::de_value_from_slice(&bytes).is_ok());
     assert!(de_from_slice::<asonb::date_time::DateTime>(&bytes).is_err());
     let bytes = ser_to_bytes(&vec![vec![1i32, 2], vec![3, 4]]).unwrap();
@@ -593,7 +598,7 @@ fn test_unrestricted_schema_round_trip() {
         (nested_schema, value)
     );
     let time = asonb::date_time::DateTime(
-        chrono::DateTime::from_timestamp(0, 1)
+        chrono::DateTime::from_timestamp(0, 0)
             .unwrap()
             .with_timezone(&chrono::FixedOffset::east_opt(0).unwrap()),
     );

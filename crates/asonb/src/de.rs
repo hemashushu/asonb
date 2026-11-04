@@ -258,7 +258,7 @@ impl<'de, I: Input<'de>> de::Deserializer<'de> for &mut Deserializer<'_, 'de, I>
             if self.ty()? != Type::DateTime {
                 return Err(self.mismatch("DateTime"));
             }
-            self.ty = Type::Tuple(vec![Type::I64, Type::U32, Type::I32]);
+            self.ty = Type::Tuple(vec![Type::I64]);
         } else {
             return Err(AsonbError::Message(
                 "Newtype structs are unsupported.".into(),

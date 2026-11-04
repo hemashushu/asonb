@@ -32,7 +32,7 @@ pub enum Value<'de> {
     F64(f64),
     Bool(bool),
     Char(char),
-    DateTime(i64, u32, i32),
+    DateTime(i64),
     String(Cow<'de, str>),
     Bytes(Cow<'de, [u8]>),
     List(Vec<Value<'de>>),
@@ -207,16 +207,8 @@ pub(crate) fn write_value(
             }
         }
         Type::DateTime => {
-            if let Value::DateTime(seconds, nanos, offset) = value {
-                if *nanos >= 1_000_000_000 {
-                    return Err(AsonbError::Message("Invalid nanoseconds.".into()));
-                }
-                if !is_valid_ason_utc_offset(*offset) {
-                    return Err(AsonbError::Message("Invalid ASON UTC offset.".into()));
-                }
-                write_all(writer, &seconds.to_le_bytes())?;
-                write_all(writer, &nanos.to_le_bytes())?;
-                return write_all(writer, &offset.to_le_bytes());
+            if let Value::DateTime(seconds) = value {
+                return write_all(writer, &seconds.to_le_bytes());
             }
         }
         Type::String(encoding) | Type::Bytes(encoding) => {
@@ -335,22 +327,7 @@ pub(crate) fn read_value<'de>(
         }
         Type::DateTime => {
             let seconds = i64::from_le_bytes(input.exact()?);
-            let nanos = input.u32()?;
-            if nanos >= 1_000_000_000 {
-                return Err(AsonbError::MessageWithOffset(
-                    "Invalid nanoseconds.".into(),
-                    input.offset() - 4,
-                ));
-            }
-            let offset_at = input.offset();
-            let offset = i32::from_le_bytes(input.exact()?);
-            if !is_valid_ason_utc_offset(offset) {
-                return Err(AsonbError::MessageWithOffset(
-                    "Invalid ASON UTC offset.".into(),
-                    offset_at,
-                ));
-            }
-            Value::DateTime(seconds, nanos, offset)
+            Value::DateTime(seconds)
         }
         Type::String(encoding) => {
             let bytes = read_blob(input, &encoding, true, root)?;
@@ -592,10 +569,7 @@ mod tests {
                 Value::Map(vec![(Value::U8(1), Value::Bool(true))]),
             );
         }
-        round_trip(
-            Type::DateTime,
-            Value::DateTime(i64::MIN, 999_999_999, 86_340),
-        );
+        round_trip(Type::DateTime, Value::DateTime(i64::MIN));
         let variants = vec![
             Variant::Unit("A".into()),
             Variant::Newtype("B".into(), Type::I8),
@@ -650,30 +624,12 @@ mod tests {
         }
         assert!(
             ser_value_to_writer(
-                &DocumentSchema::new(Type::DateTime),
-                &Value::DateTime(0, 1_000_000_000, 0),
-                &mut Vec::new()
-            )
-            .is_err()
-        );
-        assert!(
-            ser_value_to_writer(
                 &DocumentSchema::new(Type::I32),
                 &Value::I64(1),
                 &mut Vec::new()
             )
             .is_err()
         );
-        for offset in [1, -1, 86_341, -86_341, i32::MAX, i32::MIN] {
-            assert!(
-                ser_value_to_writer(
-                    &DocumentSchema::new(Type::DateTime),
-                    &Value::DateTime(0, 0, offset),
-                    &mut Vec::new(),
-                )
-                .is_err()
-            );
-        }
     }
 
     #[test]
