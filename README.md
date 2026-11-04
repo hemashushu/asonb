@@ -475,7 +475,9 @@ DateTime values occupy 8 bytes and represent whole seconds since the Unix epoch 
 
 The timestamp is encoded as a little-endian signed integer. Negative values represent instants before the epoch. When converting an ASON DateTime with a time offset to ASONB, convert the local date and time to UTC first (`UTC = local time - time offset`), then store its Unix timestamp. For example, `d"2024-03-16T16:30:50+08:00"` is stored as the timestamp for `2024-03-16T08:30:50Z`.
 
-The ASONB value does not preserve the source time offset. When converting back to ASON, represent the timestamp directly as a UTC DateTime with offset `+00:00`. The chrono adapter rejects fractional seconds rather than silently discarding them.
+The ASONB value does not preserve the source time offset. When converting back to ASON, represent the timestamp directly as a UTC DateTime with offset `+00:00`.
+
+ASON DateTime does not support fractional seconds, so does ASONB. The chrono adapter rejects fractional seconds rather than silently discarding them. If high precision is required, consider storing the date time using a custom Object.
 
 #### 4.3.5 String
 
