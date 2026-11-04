@@ -10,7 +10,7 @@
 //! uses the schema in the document and requires only Serde's `Deserialize`.
 //! [`de_from_slice`] can safely borrow contiguous string and byte payloads;
 //! [`de_from_reader`] returns owned values. Low-level [`Value`] APIs expose
-//! every wire encoding, including uninterpreted fixed-capacity slots.
+//! the supported wire encodings.
 //!
 //! ```
 //! let bytes = asonb::ser_to_bytes(&vec![11i32, 13])?;

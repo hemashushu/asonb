@@ -5,8 +5,6 @@
 // For more details, see the LICENSE, LICENSE.additional, and CONTRIBUTING files.
 
 //! Explicit values for applications that select their own wire schema.
-//! Fixed slots are kept as raw bytes: the library never invents a logical
-//! length or interprets application-defined padding.
 
 use crate::{
     AsonbError, DocumentSchema, Encoding, Type, Variant,
@@ -16,6 +14,8 @@ use std::{
     borrow::Cow,
     io::{Read, Write},
 };
+
+const MAX_ASON_UTC_OFFSET_SECONDS: i32 = 23 * 60 * 60 + 59 * 60;
 
 /// A value interpreted according to a separate document schema.
 #[derive(Debug, Clone, PartialEq)]
@@ -35,7 +35,6 @@ pub enum Value<'de> {
     DateTime(i64, u32, i32),
     String(Cow<'de, str>),
     Bytes(Cow<'de, [u8]>),
-    Fixed(Cow<'de, [u8]>),
     List(Vec<Value<'de>>),
     Map(Vec<(Value<'de>, Value<'de>)>),
     Tuple(Vec<Value<'de>>),
@@ -88,11 +87,6 @@ pub(crate) fn write_length(
     match encoding {
         Encoding::Regular | Encoding::MultiChunk => write_u32(writer, count),
         Encoding::Long => write_all(writer, &count.to_le_bytes()),
-        Encoding::Fixed(capacity) if *capacity as u64 == count => Ok(()),
-        Encoding::LongFixed(capacity) if *capacity == count => Ok(()),
-        _ => Err(AsonbError::Message(
-            "Value does not fill its fixed capacity.".into(),
-        )),
     }
 }
 
@@ -103,8 +97,6 @@ pub(crate) fn read_length<'de>(
     match encoding {
         Encoding::Regular => Ok(input.u32()? as u64),
         Encoding::Long => input.u64(),
-        Encoding::Fixed(capacity) => Ok(*capacity as u64),
-        Encoding::LongFixed(capacity) => Ok(*capacity),
         Encoding::MultiChunk => Err(AsonbError::Message("Expected a chunk boundary.".into())),
     }
 }
@@ -118,7 +110,7 @@ pub(crate) fn read_blob<'de>(
     if *encoding != Encoding::MultiChunk {
         let length = read_length(input, encoding)?;
         let bytes = input.payload(length)?;
-        if string && !matches!(encoding, Encoding::Fixed(_) | Encoding::LongFixed(_)) {
+        if string {
             validate_utf8(&bytes, input.offset() - length)?;
         }
         return Ok(bytes);
@@ -145,6 +137,11 @@ fn validate_utf8(bytes: &[u8], offset: u64) -> Result<(), AsonbError> {
     std::str::from_utf8(bytes)
         .map(|_| ())
         .map_err(|error| AsonbError::MessageWithOffset(error.to_string(), offset))
+}
+
+pub(crate) fn is_valid_ason_utc_offset(offset: i32) -> bool {
+    (-MAX_ASON_UTC_OFFSET_SECONDS..=MAX_ASON_UTC_OFFSET_SECONDS).contains(&offset)
+        && offset % 60 == 0
 }
 
 pub(crate) fn payload_type(variant: &Variant) -> Type {
@@ -214,16 +211,17 @@ pub(crate) fn write_value(
                 if *nanos >= 1_000_000_000 {
                     return Err(AsonbError::Message("Invalid nanoseconds.".into()));
                 }
+                if !is_valid_ason_utc_offset(*offset) {
+                    return Err(AsonbError::Message("Invalid ASON UTC offset.".into()));
+                }
                 write_all(writer, &seconds.to_le_bytes())?;
                 write_all(writer, &nanos.to_le_bytes())?;
                 return write_all(writer, &offset.to_le_bytes());
             }
         }
         Type::String(encoding) | Type::Bytes(encoding) => {
-            let fixed = matches!(encoding, Encoding::Fixed(_) | Encoding::LongFixed(_));
             let bytes: &[u8] = match (&ty, value) {
-                (_, Value::Fixed(bytes)) if fixed => bytes,
-                (Type::String(_), Value::String(text)) if !fixed => text.as_bytes(),
+                (Type::String(_), Value::String(text)) => text.as_bytes(),
                 (Type::Bytes(_), Value::Bytes(bytes)) => bytes,
                 _ => {
                     return Err(AsonbError::Message(
@@ -344,32 +342,32 @@ pub(crate) fn read_value<'de>(
                     input.offset() - 4,
                 ));
             }
-            Value::DateTime(seconds, nanos, i32::from_le_bytes(input.exact()?))
+            let offset_at = input.offset();
+            let offset = i32::from_le_bytes(input.exact()?);
+            if !is_valid_ason_utc_offset(offset) {
+                return Err(AsonbError::MessageWithOffset(
+                    "Invalid ASON UTC offset.".into(),
+                    offset_at,
+                ));
+            }
+            Value::DateTime(seconds, nanos, offset)
         }
         Type::String(encoding) => {
             let bytes = read_blob(input, &encoding, true, root)?;
-            if matches!(encoding, Encoding::Fixed(_) | Encoding::LongFixed(_)) {
-                Value::Fixed(bytes)
-            } else {
-                Value::String(match bytes {
-                    Cow::Borrowed(bytes) => Cow::Borrowed(
-                        std::str::from_utf8(bytes)
-                            .map_err(|error| AsonbError::Message(error.to_string()))?,
-                    ),
-                    Cow::Owned(bytes) => Cow::Owned(
-                        String::from_utf8(bytes)
-                            .map_err(|error| AsonbError::Message(error.to_string()))?,
-                    ),
-                })
-            }
+            Value::String(match bytes {
+                Cow::Borrowed(bytes) => Cow::Borrowed(
+                    std::str::from_utf8(bytes)
+                        .map_err(|error| AsonbError::Message(error.to_string()))?,
+                ),
+                Cow::Owned(bytes) => Cow::Owned(
+                    String::from_utf8(bytes)
+                        .map_err(|error| AsonbError::Message(error.to_string()))?,
+                ),
+            })
         }
         Type::Bytes(encoding) => {
             let bytes = read_blob(input, &encoding, false, root)?;
-            if matches!(encoding, Encoding::Fixed(_) | Encoding::LongFixed(_)) {
-                Value::Fixed(bytes)
-            } else {
-                Value::Bytes(bytes)
-            }
+            Value::Bytes(bytes)
         }
         Type::List(encoding, item) => {
             let mut values = Vec::new();
@@ -570,29 +568,14 @@ mod tests {
 
     #[test]
     fn test_every_payload_form() {
-        for encoding in [
-            Encoding::Regular,
-            Encoding::Long,
-            Encoding::Fixed(3),
-            Encoding::LongFixed(3),
-            Encoding::MultiChunk,
-        ] {
-            let fixed = matches!(encoding, Encoding::Fixed(_) | Encoding::LongFixed(_));
+        for encoding in [Encoding::Regular, Encoding::Long, Encoding::MultiChunk] {
             round_trip(
                 Type::String(encoding.clone()),
-                if fixed {
-                    Value::Fixed(Cow::Borrowed(b"a\0b"))
-                } else {
-                    Value::String(Cow::Borrowed("a\0b"))
-                },
+                Value::String(Cow::Borrowed("a\0b")),
             );
             round_trip(
                 Type::Bytes(encoding.clone()),
-                if fixed {
-                    Value::Fixed(Cow::Borrowed(&[0xff, 0, 3]))
-                } else {
-                    Value::Bytes(Cow::Borrowed(&[0xff, 0, 3]))
-                },
+                Value::Bytes(Cow::Borrowed(&[0xff, 0, 3])),
             );
             round_trip(
                 Type::List(encoding, Box::new(Type::I32)),
@@ -611,7 +594,7 @@ mod tests {
         }
         round_trip(
             Type::DateTime,
-            Value::DateTime(i64::MIN, 999_999_999, i32::MAX),
+            Value::DateTime(i64::MIN, 999_999_999, 86_340),
         );
         let variants = vec![
             Variant::Unit("A".into()),
@@ -652,13 +635,6 @@ mod tests {
         }
         bytes[start + 4] = 0xff;
         assert!(de_value_from_slice(&bytes).is_err());
-        let fixed = DocumentSchema::new(Type::String(Encoding::Fixed(1)));
-        let mut bytes = Vec::new();
-        ser_value_to_writer(&fixed, &Value::Fixed(Cow::Borrowed(&[0xff])), &mut bytes).unwrap();
-        assert_eq!(
-            de_value_from_slice(&bytes).unwrap().1,
-            Value::Fixed(Cow::Borrowed(&[0xff]))
-        );
     }
 
     #[test]
@@ -688,14 +664,16 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
-            ser_value_to_writer(
-                &DocumentSchema::new(Type::Bytes(Encoding::Fixed(3))),
-                &Value::Bytes(Cow::Borrowed(&[1])),
-                &mut Vec::new()
-            )
-            .is_err()
-        );
+        for offset in [1, -1, 86_341, -86_341, i32::MAX, i32::MIN] {
+            assert!(
+                ser_value_to_writer(
+                    &DocumentSchema::new(Type::DateTime),
+                    &Value::DateTime(0, 0, offset),
+                    &mut Vec::new(),
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

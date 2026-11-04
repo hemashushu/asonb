@@ -53,8 +53,6 @@ pub enum Type {
 pub enum Encoding {
     Regular,
     Long,
-    Fixed(u32),
-    LongFixed(u64),
     MultiChunk,
 }
 
@@ -182,10 +180,20 @@ impl DocumentSchema {
                 validate_fields(fields)?;
                 fields.iter().map(|field| &field.ty).collect()
             }
-            Type::Enum(_, variants) => {
+            Type::Enum(name, variants) => {
+                if !is_valid_ason_identifier(name) {
+                    return Err(AsonbError::Message(
+                        "Enumeration name must be a valid ASON identifier.".into(),
+                    ));
+                }
                 let mut names = HashSet::new();
                 let mut children = Vec::new();
                 for variant in variants {
+                    if !is_valid_ason_identifier(variant.name()) {
+                        return Err(AsonbError::Message(
+                            "Variant name must be a valid ASON identifier.".into(),
+                        ));
+                    }
                     if !names.insert(variant.name()) {
                         return Err(AsonbError::Message("Duplicate variant name.".into()));
                     }
@@ -263,11 +271,31 @@ fn validate_fields(fields: &[Field]) -> Result<(), AsonbError> {
     }
     let mut names = HashSet::new();
     for field in fields {
+        if !is_valid_ason_identifier(&field.name) {
+            return Err(AsonbError::Message(
+                "Field name must be a valid ASON identifier.".into(),
+            ));
+        }
         if !names.insert(&field.name) {
             return Err(AsonbError::Message("Duplicate field name.".into()));
         }
     }
     Ok(())
+}
+
+fn is_valid_ason_identifier(value: &str) -> bool {
+    fn is_start(character: char) -> bool {
+        character.is_ascii_alphabetic()
+            || character == '_'
+            || ('\u{00a0}'..='\u{d7ff}').contains(&character)
+            || ('\u{e000}'..='\u{10ffff}').contains(&character)
+    }
+
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    is_start(first) && characters.all(|character| is_start(character) || character.is_ascii_digit())
 }
 
 fn write_name(writer: &mut impl Write, name: &str) -> Result<(), AsonbError> {
@@ -323,10 +351,8 @@ fn write_type(writer: &mut impl Write, ty: &Type) -> Result<(), AsonbError> {
             };
             base + match encoding {
                 Encoding::Regular => 0,
-                Encoding::Fixed(_) => 1,
-                Encoding::MultiChunk => 2,
+                Encoding::MultiChunk => 1,
                 Encoding::Long => 8,
-                Encoding::LongFixed(_) => 9,
             }
         }
         Type::Map(long, _, _) => {
@@ -343,12 +369,7 @@ fn write_type(writer: &mut impl Write, ty: &Type) -> Result<(), AsonbError> {
     };
     write_all(writer, &[tag])?;
     match ty {
-        Type::String(encoding) | Type::Bytes(encoding) | Type::List(encoding, _) => {
-            match encoding {
-                Encoding::Fixed(capacity) => write_u32(writer, *capacity as u64)?,
-                Encoding::LongFixed(capacity) => write_all(writer, &capacity.to_le_bytes())?,
-                _ => {}
-            }
+        Type::String(_) | Type::Bytes(_) | Type::List(_, _) => {
             if let Type::List(_, item) = ty {
                 write_type(writer, item)?;
             }
@@ -423,13 +444,11 @@ fn read_type<'de>(input: &mut impl Input<'de>) -> Result<Type, AsonbError> {
         0x40 => Type::Bool,
         0x41 => Type::Char,
         0x42 => Type::DateTime,
-        0x50..=0x79 if matches!(tag & 15, 0 | 1 | 2 | 8 | 9) => {
+        0x50..=0x78 if matches!(tag & 15, 0 | 1 | 8) => {
             let encoding = match tag & 15 {
                 0 => Encoding::Regular,
-                1 => Encoding::Fixed(input.u32()?),
-                2 => Encoding::MultiChunk,
+                1 => Encoding::MultiChunk,
                 8 => Encoding::Long,
-                9 => Encoding::LongFixed(input.u64()?),
                 _ => unreachable!(),
             };
             match tag >> 4 {
@@ -652,13 +671,7 @@ mod tests {
                 ],
             ),
         ];
-        for encoding in [
-            Encoding::Regular,
-            Encoding::Long,
-            Encoding::Fixed(8),
-            Encoding::LongFixed(u64::MAX),
-            Encoding::MultiChunk,
-        ] {
+        for encoding in [Encoding::Regular, Encoding::Long, Encoding::MultiChunk] {
             types.push(Type::String(encoding.clone()));
             types.push(Type::Bytes(encoding.clone()));
             types.push(Type::List(encoding, Box::new(Type::I8)));
@@ -675,6 +688,34 @@ mod tests {
             for end in 0..bytes.len() {
                 assert!(DocumentSchema::read(&mut SliceInput::new(&bytes[..end])).is_err());
             }
+        }
+    }
+
+    #[test]
+    fn test_unsupported_type_classes_are_rejected() {
+        for tag in [0x52, 0x59, 0x62, 0x69, 0x72, 0x79] {
+            assert!(
+                read_type(&mut SliceInput::new(&[tag])).is_err(),
+                "tag {tag:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_multi_chunk_type_classes() {
+        for (ty, expected_tag) in [
+            (Type::String(Encoding::MultiChunk), 0x51),
+            (Type::Bytes(Encoding::MultiChunk), 0x61),
+            (Type::List(Encoding::MultiChunk, Box::new(Type::I32)), 0x71),
+        ] {
+            let schema = DocumentSchema::new(ty);
+            let mut bytes = Vec::new();
+            schema.write(&mut bytes).unwrap();
+            assert_eq!(bytes[4], expected_tag);
+            assert_eq!(
+                DocumentSchema::read(&mut SliceInput::new(&bytes)).unwrap(),
+                schema
+            );
         }
     }
 
@@ -758,13 +799,64 @@ mod tests {
         );
         assert!(
             DocumentSchema::new(Type::Enum(
-                "".into(),
+                "E".into(),
                 vec![Variant::Unit("x".into()), Variant::Unit("x".into())]
             ))
             .validate()
             .is_err()
         );
+        let empty_enum =
+            DocumentSchema::new(Type::Enum("".into(), vec![Variant::Unit("x".into())]));
+        assert!(matches!(
+            empty_enum.validate(),
+            Err(AsonbError::Message(message)) if message == "Enumeration name must be a valid ASON identifier."
+        ));
+        let mut output = Vec::new();
+        assert!(
+            crate::ser_value_to_writer(&empty_enum, &crate::Value::I32(1), &mut output).is_err()
+        );
+        assert!(output.is_empty());
+        let mut schema_bytes = Vec::new();
+        empty_enum.write(&mut schema_bytes).unwrap();
+        assert!(DocumentSchema::read(&mut SliceInput::new(&schema_bytes)).is_err());
         assert!(DocumentSchema::read(&mut SliceInput::new(&[0, 0, 0, 0, 0xff])).is_err());
+    }
+
+    #[test]
+    fn test_ason_identifier_validation() {
+        for name in ["_field2", "field_2", "文🙂"] {
+            DocumentSchema::new(Type::Object("".into(), vec![Field::new(name, Type::I8)]))
+                .validate()
+                .unwrap();
+            DocumentSchema::new(Type::Enum(name.into(), vec![Variant::Unit(name.into())]))
+                .validate()
+                .unwrap();
+        }
+
+        for name in [
+            "",
+            "2field",
+            "has space",
+            "has-hyphen",
+            "has::separator",
+            "\u{7f}",
+        ] {
+            assert!(
+                DocumentSchema::new(Type::Object("".into(), vec![Field::new(name, Type::I8)],))
+                    .validate()
+                    .is_err()
+            );
+            assert!(
+                DocumentSchema::new(Type::Enum(name.into(), vec![Variant::Unit("Valid".into())],))
+                    .validate()
+                    .is_err()
+            );
+            assert!(
+                DocumentSchema::new(Type::Enum("Valid".into(), vec![Variant::Unit(name.into())],))
+                    .validate()
+                    .is_err()
+            );
+        }
     }
 
     #[test]

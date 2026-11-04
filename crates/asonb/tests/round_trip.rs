@@ -179,7 +179,7 @@ fn test_field_and_variant_name_resolution() {
     }
     assert!(de_from_slice::<Strict>(&bytes).is_err());
     let schema = DocumentSchema::new(Type::Enum(
-        "".into(),
+        "Event".into(),
         vec![
             Variant::Newtype("Number".into(), Type::I32),
             Variant::Unit("None".into()),
@@ -206,7 +206,7 @@ fn test_date_time_and_bytes_adapters() {
     }
     let instant = chrono::DateTime::from_timestamp(-1, 500_000_000).unwrap();
     let value = Record {
-        time: instant.with_timezone(&chrono::FixedOffset::east_opt(28_801).unwrap()),
+        time: instant.with_timezone(&chrono::FixedOffset::east_opt(28_800).unwrap()),
         data: vec![0xff, 0, 1],
     };
     let bytes = ser_to_bytes(&value).unwrap();
@@ -453,7 +453,7 @@ fn test_malformed_input() {
     }
     let schema = DocumentSchema::new(Type::DateTime);
     let mut bytes = Vec::new();
-    ser_value_to_writer(&schema, &Value::DateTime(i64::MAX, 0, i32::MAX), &mut bytes).unwrap();
+    ser_value_to_writer(&schema, &Value::DateTime(i64::MAX, 0, 0), &mut bytes).unwrap();
     assert!(asonb::de_value_from_slice(&bytes).is_ok());
     assert!(de_from_slice::<asonb::date_time::DateTime>(&bytes).is_err());
     let bytes = ser_to_bytes(&vec![vec![1i32, 2], vec![3, 4]]).unwrap();
@@ -461,44 +461,16 @@ fn test_malformed_input() {
         de_from_slice::<Vec<Vec<i32>>>(&bytes).unwrap(),
         vec![vec![1, 2], vec![3, 4]]
     );
-    let fixed = DocumentSchema::new(Type::String(Encoding::Fixed(3)));
-    let mut bytes = Vec::new();
-    ser_value_to_writer(
-        &fixed,
-        &Value::Fixed(Cow::Borrowed(&[0xff, 0, 0x81])),
-        &mut bytes,
-    )
-    .unwrap();
-    assert!(de_from_slice::<String>(&bytes).is_err());
-    assert!(asonb::de_value_from_slice(&bytes).is_ok());
 }
 
 #[test]
 fn test_value_encodings_round_trip() {
-    for encoding in [
-        Encoding::Regular,
-        Encoding::Long,
-        Encoding::Fixed(4),
-        Encoding::LongFixed(4),
-        Encoding::MultiChunk,
-    ] {
-        let fixed = matches!(encoding, Encoding::Fixed(_) | Encoding::LongFixed(_));
+    for encoding in [Encoding::Regular, Encoding::Long, Encoding::MultiChunk] {
         let cases = [
-            (
-                Type::String(encoding.clone()),
-                if fixed {
-                    Value::Fixed(Cow::Borrowed("a文".as_bytes()))
-                } else {
-                    Value::String("a文".into())
-                },
-            ),
+            (Type::String(encoding.clone()), Value::String("a文".into())),
             (
                 Type::Bytes(encoding.clone()),
-                if fixed {
-                    Value::Fixed(Cow::Borrowed(&[0xff, 0, 1, 2]))
-                } else {
-                    Value::Bytes(Cow::Borrowed(&[0xff, 0, 1, 2]))
-                },
+                Value::Bytes(Cow::Borrowed(&[0xff, 0, 1, 2])),
             ),
             (
                 Type::List(encoding, Box::new(Type::I32)),

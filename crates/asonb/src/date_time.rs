@@ -82,6 +82,9 @@ pub fn deserialize<'de, D: Deserializer<'de>>(
             let instant = ChronoDateTime::from_timestamp(seconds, nanos).ok_or_else(|| {
                 serde::de::Error::custom("DateTime exceeds chrono's timestamp range.")
             })?;
+            if !crate::value::is_valid_ason_utc_offset(offset) {
+                return Err(serde::de::Error::custom("Invalid ASON UTC offset."));
+            }
             let offset = FixedOffset::east_opt(offset)
                 .ok_or_else(|| serde::de::Error::custom("UTC offset exceeds chrono's range."))?;
             Ok(instant.with_timezone(&offset))
@@ -111,7 +114,7 @@ mod tests {
     fn test_binary_round_trips() {
         for seconds in [-1, 0, 1] {
             for nanos in [0, 500_000_000, 999_999_999] {
-                for offset in [-86_399, 0, 28_801, 86_399] {
+                for offset in [-86_340, 0, 28_800, 86_340] {
                     let value = DateTime(
                         ChronoDateTime::from_timestamp(seconds, nanos)
                             .unwrap()
@@ -136,6 +139,10 @@ mod tests {
             (0, 1_000_000_000, 0i32),
             (0, u32::MAX, 0),
             (i64::MAX, 0, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+            (0, 0, 86_341),
+            (0, 0, -86_341),
             (0, 0, 86_400),
             (0, 0, -86_400),
         ] {
@@ -144,8 +151,10 @@ mod tests {
             payload.extend_from_slice(&offset.to_le_bytes());
             let bytes = crate::test_utils::document(Type::DateTime, &payload);
             assert!(crate::de_from_slice::<DateTime>(&bytes).is_err());
-            if nanos < 1_000_000_000 {
+            if nanos < 1_000_000_000 && (-86_340..=86_340).contains(&offset) && offset % 60 == 0 {
                 assert!(crate::de_value_from_slice(&bytes).is_ok());
+            } else {
+                assert!(crate::de_value_from_slice(&bytes).is_err());
             }
         }
         let leap = DateTime(
@@ -154,5 +163,12 @@ mod tests {
                 .with_timezone(&FixedOffset::east_opt(0).unwrap()),
         );
         assert!(crate::ser_to_bytes(&leap).is_err());
+
+        let second_precision_offset = DateTime(
+            ChronoDateTime::from_timestamp(0, 0)
+                .unwrap()
+                .with_timezone(&FixedOffset::east_opt(1).unwrap()),
+        );
+        assert!(crate::ser_to_bytes(&second_precision_offset).is_err());
     }
 }

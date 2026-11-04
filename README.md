@@ -70,8 +70,8 @@ The APIs use [Serde](https://github.com/serde-rs/serde) (the serialization frame
 
 ```toml
 [dependencies]
-asonb = "3.2"
-serde = { version = "1.0", features = ["derive"] }
+asonb = "3"
+serde = { version = "1", features = ["derive"] }
 ```
 
 ### 3.1 Deserialization and Serialization
@@ -280,7 +280,7 @@ Rust fixed-size arrays `[T; N]` use Tuples by default, with one element type per
 | `[u8; N]`                       | Tuple of `u8` values | Byte Data     | List of `u8` values |
 | `[T; N]`, where `T` is not `u8` | Tuple of `T` values  | Not supported | List of `T` values  |
 
-For chrono values, use `asonb::date_time::DateTime` at the root or the field adapter `asonb::date_time` below. It preserves timestamp, nanoseconds, and numeric offset directly, including offsets with second precision. Ordinary chrono serialization uses strings and must not be confused with this binary mapping.
+For chrono values, use `asonb::date_time::DateTime` at the root or the field adapter `asonb::date_time` below. It preserves timestamp, nanoseconds, and numeric offset directly. Offsets must be whole-minute values in the range `-23:59` to `+23:59`, as required by ASON. Ordinary chrono serialization uses strings and must not be confused with this binary mapping.
 
 ```rust
 use asonb::Schema;
@@ -358,6 +358,8 @@ The root value bytes immediately follow the schema. Their layout is determined b
 
 ASONB represents ASON's primitive and compound value types, including numbers, Booleans, Strings, Lists, Maps, Objects, Tuples, and Enumerations.
 
+When generating an ASONB document from ASON data, follow the ASON standard; ASONB does not extend or redefine its data types, value ranges, or precision. Object keys, Enumeration names, and variant names must be valid ASON identifiers.
+
 To align with ASON, the following constraints apply:
 
 - A Tuple must contain at least one element.
@@ -417,8 +419,6 @@ String, Byte Data, and compound type definitions are described alongside their v
 
 All integers and IEEE 754 floating-point bit patterns are stored in little-endian byte order. Strings use UTF-8. Values are concatenated without implicit alignment or padding.
 
-Fixed-capacity String, Byte Data, and List encodings are intended for low-level systems that need reserved storage or predictable layouts. ASONB specifies their capacities and framing, but does not prescribe logical content lengths, padding values, or how applications distinguish content from unused capacity. The zero-filled examples below illustrate an application convention, not a format requirement.
-
 Multi-chunk String, Byte Data, and List values use a zero chunk length (`0x00 0x00 0x00 0x00`) as an end marker, not as an empty data chunk. The marker occupies exactly four bytes and has no payload. An empty multi-chunk value consists of this marker, or immediate EOF if it is the root value.
 
 EOF may replace an end marker only for a root multi-chunk value. EOF within a length prefix, payload, or incomplete list element is a truncation error. Nested values require an explicit end marker. A live source must end or supply the marker before a reader can conclude that the root value is complete.
@@ -477,15 +477,15 @@ The fields are:
 
 - Timestamp (`i64`, 8 bytes): whole seconds since the Unix epoch, `1970-01-01T00:00:00Z`. Negative values represent instants before the epoch.
 
-- Nanoseconds (`u32`, 4 bytes): the fractional second, in `0..=999_999_999`. Decoders must reject larger values. The instant is `timestamp + nanoseconds / 1_000_000_000` seconds from the epoch, using fractional rather than integer division. The timestamp is rounded down, including before the epoch: `timestamp = -1` and `nanoseconds = 500_000_000` represent half a second before the epoch.
+- Nanoseconds (`u32`, 4 bytes): the fractional second, in `0..=999_999_999`. Decoders must reject larger values. ASONB stores and preserves this field, but ASON DateTime has only whole-second precision, so the field is ignored when converting to ASON and reserved for future design compatibility.
 
-- UTC offset (`i32`, 4 bytes): the offset in seconds. A positive value means local time is ahead of UTC; for example, `+08:00` is `28_800`. The timestamp already represents a UTC-based instant, so this offset must not be subtracted from it again. UTC uses zero. The field preserves a numeric offset, not a named time zone such as `Asia/Shanghai`.
+- UTC offset (`i32`, 4 bytes): the offset in seconds. It must be a whole-minute value in the range `-23:59` to `+23:59`, matching ASON DateTime syntax. A positive value means local time is ahead of UTC; for example, `+08:00` is `28_800`. The timestamp already represents a UTC-based instant, so this offset must not be subtracted from it again. UTC uses zero. The field preserves a numeric offset, not a named time zone such as `Asia/Shanghai`.
 
 Conversion to ASON must respect the DateTime syntax and range supported by the ASON standard; see [Conversion to and from ASON](#45-conversion-to-and-from-ason).
 
 #### 4.3.5 String
 
-Strings have three encoding forms: regular, fixed-capacity, and multi-chunk. The regular and fixed-capacity forms also have long variants with `u64` lengths or capacities.
+Strings have regular and multi-chunk encoding forms. Regular Strings also have a long variant with a `u64` length.
 
 Their type definitions and value layouts are:
 
@@ -493,11 +493,9 @@ Their type definitions and value layouts are:
 |----------------------------|-----------------|--------------------------------------------------------------------|
 | Regular String             | [0x50]          | [length in `u32`, UTF-8 encoded bytes]                             |
 | Long regular String        | [0x58]          | [length in `u64`, UTF-8 encoded bytes]                             |
-| Fixed-capacity String      | [0x51, capacity in `u32`] | [capacity bytes; application-defined content and padding] |
-| Long fixed-capacity String | [0x59, capacity in `u64`] | [capacity bytes; application-defined content and padding] |
-| Multi-chunk String         | [0x52]          | [[length in `u32`, UTF-8 encoded bytes], ..., optional end marker] |
+| Multi-chunk String         | [0x51]          | [[length in `u32`, UTF-8 encoded bytes], ..., optional end marker] |
 
-##### 3.3.5.1 Regular String
+##### 4.3.5.1 Regular String
 
 A regular String consists of a `u32` byte length followed by that many UTF-8 bytes. There is no null terminator.
 
@@ -533,7 +531,7 @@ An empty String contains only a zero length prefix:
 ]
 ```
 
-##### 3.3.5.2 Long Regular String
+##### 4.3.5.2 Long Regular String
 
 Long regular Strings use a `u64` length prefix instead of `u32`, allowing lengths beyond the regular form's maximum of `2^32 - 1` bytes.
 
@@ -559,42 +557,7 @@ For example, `"Hello"` occupies five UTF-8 bytes:
 
 Prefer the regular form unless the byte length may exceed `2^32 - 1`.
 
-##### 3.3.5.3 Fixed-capacity String
-
-Fixed-capacity Strings reserve a fixed number of bytes, specified as a `u32` in the type definition. The value occupies exactly that many bytes, with no length prefix or null terminator. Applications determine the logical string length and how unused bytes are filled or interpreted.
-
-This form follows the low-level conventions described in [Encoding](#43-encoding), rather than defining a general-purpose string representation with a recoverable content length.
-
-The following complete document reserves eight bytes. The application stores `"Hello"` and fills the remaining bytes with zeros:
-
-```text
-[
-    /* document header */
-    0x00,                           // Binary format indicator
-    0x41, 0x53, 0x4F, 0x4E, 0x42,   // Magic number "ASONB"
-    0x00,                           // 1-byte feature flags
-    0x01,                           // 1-byte version number
-
-    /* reference-type definitions count */
-    0x00, 0x00, 0x00, 0x00,         // No reference types are defined
-
-    /* root value type */
-    0x51,                           // Fixed-capacity String type class
-    0x08, 0x00, 0x00, 0x00,         // Capacity: eight bytes
-
-    /* root value bytes */
-    0x48, 0x65, 0x6C, 0x6C, 0x6F,   // UTF-8 encoded bytes of the string "Hello"
-    0x00, 0x00, 0x00,               // Application-defined zero padding
-]
-```
-
-> ASONB does not prescribe how to recover the content length. An application may use a separate length field or its own content restrictions. Treating the first zero byte as the end of the string is lossless only if the application forbids U+0000 in the content.
-
-##### 3.3.5.4 Long Fixed-capacity String
-
-Long fixed-capacity Strings use a `u64` capacity in the type definition instead of `u32`. All other layout rules are unchanged.
-
-##### 3.3.5.5 Multi-chunk String
+##### 4.3.5.3 Multi-chunk String
 
 Multi-chunk Strings support incremental production when the total length is not known in advance.
 
@@ -636,15 +599,13 @@ For example, the String `"HelloWorld"` can be written in two chunks, `"Hello"` a
 
 Byte Data stores arbitrary byte sequences. It uses the same framing as String, but requires no UTF-8 validation.
 
-It has regular, fixed-capacity, and multi-chunk forms, with long variants of the first two:
+Byte Data has regular and multi-chunk forms. Regular Byte Data also has a long variant with a `u64` length:
 
-| Type                          | Type Definition | Value Binary Representation                      |
-|-------------------------------|-----------------|--------------------------------------------------|
-| Regular Byte Data             | [0x60]          | [length in `u32`, data bytes]                    |
-| Long regular Byte Data        | [0x68]          | [length in `u64`, data bytes]                    |
-| Fixed-capacity Byte Data      | [0x61, capacity in `u32`] | [capacity bytes]                       |
-| Long fixed-capacity Byte Data | [0x69, capacity in `u64`] | [capacity bytes]                       |
-| Multi-chunk Byte Data         | [0x62]          | [[length in `u32`, data bytes], ..., optional end marker] |
+| Type                          | Type Definition | Value Binary Representation                               |
+|-------------------------------|-----------------|-----------------------------------------------------------|
+| Regular Byte Data             | [0x60]          | [length in `u32`, data bytes]                             |
+| Long regular Byte Data        | [0x68]          | [length in `u64`, data bytes]                             |
+| Multi-chunk Byte Data         | [0x61]          | [[length in `u32`, data bytes], ..., optional end marker] |
 
 For example, the regular Byte Data encoding of `[0x01, 0x02, 0x03, 0x04]` is:
 
@@ -664,17 +625,6 @@ Empty regular Byte Data consists only of a zero length prefix:
     /* value bytes */
 
     0x00, 0x00, 0x00, 0x00          // Zero byte length
-]
-```
-
-Fixed-capacity Byte Data occupies exactly the specified number of bytes. Its logical length and unused bytes are application-defined. For example, an application may store four data bytes in an eight-byte slot and fill the remaining bytes with zeros:
-
-```text
-[
-    /* value bytes */
-
-    0x01, 0x02, 0x03, 0x04,         // Content bytes
-    0x00, 0x00, 0x00, 0x00          // Application-defined zero padding
 ]
 ```
 
@@ -701,15 +651,13 @@ Multi-chunk Byte Data uses nonempty, `u32`-length-prefixed chunks and the shared
 
 A List is a sequence of elements with the same type. The element type is part of the List's type definition.
 
-Like String and Byte Data, List has regular, fixed-capacity, and multi-chunk forms, with long variants of the first two. List lengths and capacities count elements, not bytes.
+Like String and Byte Data, List has regular and multi-chunk forms. Regular Lists also have a long variant with a `u64` length. List lengths count elements, not bytes.
 
 | Type                     | Type Definition      | Value Binary Representation                                   |
 |--------------------------|----------------------|---------------------------------------------------------------|
 | Regular List             | [0x70, element type] | [length in `u32`, element 1, element 2, ...]                  |
 | Long regular List        | [0x78, element type] | [length in `u64`, element 1, element 2, ...]                  |
-| Fixed-capacity List      | [0x71, capacity in `u32`, element type] | [capacity element encodings]              |
-| Long fixed-capacity List | [0x79, capacity in `u64`, element type] | [capacity element encodings]              |
-| Multi-chunk List         | [0x72, element type] | [[length in `u32`, element 1, ...], ..., optional end marker] |
+| Multi-chunk List         | [0x71, element type] | [[length in `u32`, element 1, ...], ..., optional end marker] |
 
 For example, consider the regular List `[0x11, 0x13, 0x17, 0x19]` with `i32` elements.
 
@@ -744,7 +692,7 @@ Its type definition is:
 ```text
 [
     /* type definition */
-    0x72,                           // Multi-chunk List type class
+    0x71,                           // Multi-chunk List type class
     0x15,                           // Element type: i32
 ]
 ```
@@ -774,58 +722,11 @@ Each chunk starts with its element count. The value encoding is:
 
 The end marker is optional only for a root multi-chunk List at EOF, as described in [Encoding](#43-encoding).
 
-Fixed-capacity Lists store exactly the capacity's number of element encodings, without a value-area count. Applications decide which slots are logically used and what values occupy unused slots; ASONB defines no default padding value. The encoded byte size is fixed only when the element type also has a fixed encoded size.
-
-For example, an application may fill unused `i32` slots with zeros or unused regular String slots with empty Strings. These are application conventions, not serialization requirements.
-
-The following example uses a fixed-capacity List of fixed-capacity Strings. The application stores two logical elements:
-
-`["foo", "beef"]`
-
-The capacities are:
-
-- Four elements in the List.
-- Four bytes in each String slot.
-
-Its type definition is:
-
-```text
-[
-    /* type definition */
-    0x71,                           // Fixed-capacity List type class
-    0x04, 0x00, 0x00, 0x00,         // List capacity: four elements
-    0x51,                           // Element type: fixed-capacity String
-    0x04, 0x00, 0x00, 0x00,         // String capacity: four bytes
-]
-```
-
-Using application-defined zero padding, its value encoding is:
-
-```text
-[
-    /* value bytes */
-
-    /* first element "foo" */
-    0x66, 0x6F, 0x6F, 0x00,             // "foo" with one padding byte
-
-    /* second element "beef" */
-    0x62, 0x65, 0x65, 0x66,             // "beef"
-
-    /* Unused third slot */
-    0x00, 0x00, 0x00, 0x00,             // Application-defined zero-filled slot
-
-    /* Unused fourth slot */
-    0x00, 0x00, 0x00, 0x00,             // Application-defined zero-filled slot
-]
-```
-
-Use regular or multi-chunk Lists for general-purpose serialization; the fixed-capacity form requires application-specific conventions.
-
 #### 4.3.8 Map
 
 A Map is a sequence of key-value pairs. Both keys and values are ASONB values; keys are often Strings.
 
-All keys share one type, and all values share one type, as specified in the Map type definition. Map supports only regular and long regular encodings. Their lengths count pairs, not individual keys or values. Fixed-capacity and multi-chunk Maps are not defined.
+All keys share one type, and all values share one type, as specified in the Map type definition. Map supports only regular and long regular encodings. Their lengths count pairs, not individual keys or values. Multi-chunk Maps are not defined.
 
 | Type             | Type Definition               | Value Binary Representation                       |
 |------------------|-------------------------------|---------------------------------------------------|
@@ -1028,7 +929,7 @@ Its type definition contains `0xB0`, the enumeration name, the variant count, an
 ]
 ```
 
-The enumeration name is optional metadata for binary decoding. An unnamed Enumeration uses an empty regular String (`[0x00, 0x00, 0x00, 0x00]`). Conversion to ASON requires a valid enumeration name, either stored here or supplied by the application.
+The enumeration name is required and must not be empty. It is encoded as a regular String. Conversion to ASON also requires the name to be a valid ASON identifier.
 
 Each variant definition includes its name and any payload types. Variant names must be unique within the Enumeration; field names within an object-like variant must also be unique. Four forms are supported:
 
@@ -1172,11 +1073,9 @@ Note that this example shows only the reference-type table; a complete document 
 
 The [ASON standard](https://github.com/hemashushu/ason/blob/main/docs/specification.md) governs conversion between ASON text and ASONB. The binary format does not extend ASON's text syntax or relax its value constraints.
 
-Conversion preserves values, not source formatting, comments, or the choice of binary encoding form. Converting from ASON requires a schema supplied by the application or derived from the value where sufficient type information is available; empty collections may require explicit element, key, or value types.
+Conversion preserves values when ASON can represent them, but not source formatting, comments, or the choice of binary encoding form. Converting from ASON requires a schema supplied by the application or derived from the value where sufficient type information is available. Empty collections (empty Lists or Maps) are not type-inferred and are mapped to an empty List.
 
-When converting to ASON, values must be representable under the applicable ASON standard. This includes valid field and variant identifiers, enumeration names, tuple and variant arities, and DateTime ranges, precision, and offsets. A converter must report an error when a value cannot be represented without loss, unless the application explicitly supplies a conversion policy. It must not silently discard precision or invent missing names.
-
-Fixed-capacity values require application-defined interpretation before conversion, including how to identify logical content and unused slots. ASONB does not impose those low-level conventions.
+When converting DateTime to ASON, timestamp ranges and nanosecond precision that ASON cannot represent are discarded without warning or error. UTC offsets are validated against the ASON DateTime limits.
 
 ## 5 File Extension and MIME Type
 

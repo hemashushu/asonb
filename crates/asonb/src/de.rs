@@ -193,10 +193,6 @@ impl<'de, I: Input<'de>> de::Deserializer<'de> for &mut Deserializer<'_, 'de, I>
         let Type::String(encoding) = self.ty()? else {
             return Err(self.mismatch("a String"));
         };
-        if matches!(encoding, Encoding::Fixed(_) | Encoding::LongFixed(_)) {
-            return Err(self
-                .mismatch("an application-interpreted fixed String slot (use the low-level API)"));
-        }
         match read_blob(self.input, &encoding, true, self.root)? {
             Cow::Borrowed(bytes) => visitor.visit_borrowed_str(
                 std::str::from_utf8(bytes)
@@ -211,9 +207,6 @@ impl<'de, I: Input<'de>> de::Deserializer<'de> for &mut Deserializer<'_, 'de, I>
         let Type::String(encoding) = self.ty()? else {
             return Err(self.mismatch("a String"));
         };
-        if matches!(encoding, Encoding::Fixed(_) | Encoding::LongFixed(_)) {
-            return Err(self.mismatch("an application-interpreted fixed String slot"));
-        }
         let bytes = read_blob(self.input, &encoding, true, self.root)?;
         visitor.visit_string(
             String::from_utf8(bytes.into_owned())
