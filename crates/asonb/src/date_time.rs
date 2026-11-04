@@ -151,5 +151,14 @@ mod tests {
                 .with_timezone(&FixedOffset::east_opt(1).unwrap()),
         );
         assert!(crate::ser_to_bytes(&second_precision_offset).is_err());
+
+        for offset in [-86_399, 86_399] {
+            let out_of_range_offset = DateTime(
+                ChronoDateTime::from_timestamp(0, 0)
+                    .unwrap()
+                    .with_timezone(&FixedOffset::east_opt(offset).unwrap()),
+            );
+            assert!(crate::ser_to_bytes(&out_of_range_offset).is_err());
+        }
     }
 }

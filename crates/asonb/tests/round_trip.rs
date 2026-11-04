@@ -83,6 +83,15 @@ fn test_enum_variants_and_empty_containers() {
     );
 }
 
+#[test]
+fn test_empty_list_i32_fallback_type_round_trip() {
+    let schema = DocumentSchema::new(Type::List(Encoding::Regular, Box::new(Type::I32)));
+    let value = Value::List(vec![]);
+    let mut bytes = Vec::new();
+    ser_value_to_writer(&schema, &value, &mut bytes).unwrap();
+    assert_eq!(asonb::de_value_from_slice(&bytes).unwrap(), (schema, value));
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
 #[serde(rename_all = "camelCase")]
 struct Renamed<T> {
@@ -501,8 +510,9 @@ fn test_value_encodings_round_trip() {
     for long in [false, true] {
         let schema = DocumentSchema::new(Type::Map(long, Box::new(Type::U8), Box::new(Type::I32)));
         let value = Value::Map(vec![
-            (Value::U8(1), Value::I32(11)),
-            (Value::U8(2), Value::I32(13)),
+            (Value::U8(2), Value::I32(11)),
+            (Value::U8(1), Value::I32(13)),
+            (Value::U8(2), Value::I32(17)),
         ]);
         let mut bytes = Vec::new();
         ser_value_to_writer(&schema, &value, &mut bytes).unwrap();

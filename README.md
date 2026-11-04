@@ -16,7 +16,7 @@ _ASONB_ avoids text-based numeric parsing and repeated object field names in the
   - [3.1 Deserialization and Serialization](#31-deserialization-and-serialization)
   - [3.2 Streaming Deserialization and Serialization](#32-streaming-deserialization-and-serialization)
   - [3.3 Rust Type Mappings](#33-rust-type-mappings)
-- [4 Quick Reference](#4-quick-reference)
+- [4 Specification](#4-specification)
   - [4.1 Document](#41-document)
     - [4.1.1 Document Header](#411-document-header)
     - [4.1.2 Document Schema](#412-document-schema)
@@ -297,7 +297,7 @@ struct Record {
 
 Add `chrono` and `serde_bytes` crates to the application's dependencies when using these field types and adapters. Valid wire DateTime timestamps outside chrono's range remain accessible through the low-level `Value::DateTime(i64)` representation.
 
-## 4 Quick Reference
+## 4 Specification
 
 ### 4.1 Document
 
@@ -363,11 +363,11 @@ When generating an ASONB document from ASON data, follow the ASON standard; ASON
 To align with ASON, the following constraints apply:
 
 - A Tuple must contain at least one element.
-- An Object must contain at least one key-value pair, and its keys must be unique. This also applies to object-like variant payloads.
+- An ASONB Object schema must contain at least one field, and its field names must be unique. ASON's `{}` text form is a shorthand for omitting fields with defaults in the target type; it does not represent an empty Object. ASONB object-like variant schemas must also contain at least one field, though ASON text can omit their defaulted fields in the same way.
 - A tuple-like variant must contain at least two elements. Zero-element and one-element tuple-like variants are invalid; in textual ASON, the one-element form conflicts with a single-value variant. A single-value variant may itself contain a nonempty Tuple.
-- Map keys (names) must be unique. The library does not check Map key uniqueness; applications must enforce it. Duplicate Object keys are already rejected by schema validation.
+- ASON Maps are ordered sequences of key-value pairs, and the ASON specification does not impose a uniqueness constraint on Map keys. ASONB preserves the pairs in sequence and leaves duplicate-key handling to applications. Duplicate Object field names are rejected by schema validation.
 
-Lists and Maps may be empty. Schema validation checks these structural constraints even for unused reference definitions and unselected variants.
+Lists and Maps may be empty. In ASON, an empty List or Map gets its type from the expected target type; `[]` alone does not distinguish them. Schema validation checks ASONB structural constraints even for unused reference definitions and unselected variants.
 
 Each type definition starts with a one-byte type class, followed by any type-specific bytes:
 
@@ -475,9 +475,9 @@ DateTime values occupy 8 bytes and represent whole seconds since the Unix epoch 
 
 The timestamp is encoded as a little-endian signed integer. Negative values represent instants before the epoch. When converting an ASON DateTime with a time offset to ASONB, convert the local date and time to UTC first (`UTC = local time - time offset`), then store its Unix timestamp. For example, `d"2024-03-16T16:30:50+08:00"` is stored as the timestamp for `2024-03-16T08:30:50Z`.
 
-The ASONB value does not preserve the source time offset. When converting back to ASON, represent the timestamp directly as a UTC DateTime with offset `+00:00`.
+The ASONB value does not preserve the source time offset. When converting back to ASON, represent the timestamp directly as a UTC DateTime with offset `+00:00`, provided the resulting date-time is representable by ASON's DateTime syntax.
 
-ASON DateTime does not support fractional seconds, so does ASONB. The chrono adapter rejects fractional seconds rather than silently discarding them. If high precision is required, consider storing the date time using a custom Object.
+ASON DateTime does not support fractional seconds, and neither does ASONB. The chrono adapter rejects fractional seconds rather than silently discarding them. If high precision is required, consider storing the date time using a custom Object.
 
 #### 4.3.5 String
 
@@ -1067,11 +1067,11 @@ Note that this example shows only the reference-type table; a complete document 
 
 ### 4.5 Conversion to and from ASON
 
-The [ASON standard](https://github.com/hemashushu/ason/blob/main/docs/specification.md) governs conversion between ASON text and ASONB. The binary format does not extend ASON's text syntax or relax its value constraints.
+The [ASON standard](https://github.com/hemashushu/ason/blob/main/docs/specification.md) governs conversion between ASON text and ASONB. The binary format does not extend ASON's text syntax or relax its value constraints. This crate does not implement ASON text conversion.
 
-Conversion preserves values when ASON can represent them, but not source formatting, comments, or the choice of binary encoding form. Converting from ASON requires a schema supplied by the application or derived from the value where sufficient type information is available. Empty collections (which may be empty Lists or Maps) that cannot be inferred from context are both mapped to an empty List of `i32`.
+Conversion preserves values when ASON can represent them, but not source formatting, comments, or the choice of binary encoding form. Converting from ASON requires a schema supplied by the application or derived from the expected target type where sufficient type information is available. In particular, ASON uses that context to determine whether `[]` is an empty List or Map and to resolve its element, key, and value types. When an ASON `[]` cannot be inferred from context, ASONB uses `List<i32>` as the fallback type.
 
-DateTime conversion applies an ASON time offset when producing the UTC timestamp. Converting back produces a UTC DateTime with offset `+00:00`; the original offset is not recoverable. The chrono adapter rejects nonzero fractional seconds because ASON DateTime and the ASONB representation both use whole-second precision.
+DateTime conversion applies an ASON time offset when producing the UTC timestamp. Converting back produces a UTC DateTime with offset `+00:00` when the timestamp is representable by ASON's DateTime syntax; the original offset is not recoverable. The chrono adapter rejects nonzero fractional seconds because ASON DateTime and the ASONB representation both use whole-second precision.
 
 ## 5 File Extension and MIME Type
 
