@@ -53,6 +53,9 @@ pub use asonb_derive::Schema;
 pub use error::AsonbError;
 pub use schema::{DocumentSchema, Encoding, Field, Schema, SchemaBuilder, Type, Variant};
 
-pub use de::{ListStreamReader, de_from_reader, de_from_slice, list_stream_reader};
+pub use de::{
+    ListStreamReader, ValueDocumentReader, de_from_reader, de_from_slice, list_stream_reader,
+    value_document_reader,
+};
 pub use ser::{ListStreamWriter, list_stream_writer, ser_to_bytes, ser_to_writer};
 pub use value::{Value, de_value_from_reader, de_value_from_slice, ser_value_to_writer};

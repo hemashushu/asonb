@@ -51,6 +51,30 @@ pub fn list_stream_reader<T: de::DeserializeOwned, R: Read>(
     })
 }
 
+pub fn value_document_reader<R: Read>(reader: R) -> Result<ValueDocumentReader<R>, AsonbError> {
+    let mut input = ReaderInput::new(reader);
+    input.header()?;
+    let schema = DocumentSchema::read(&mut input)?;
+    let root = schema.resolve(schema.root.clone())?;
+    let (item, pending) = match &root {
+        Type::List(Encoding::MultiChunk, item) => (Some((**item).clone()), None),
+        _ => {
+            let value = read_value(&mut input, &schema, &root, true)?;
+            input.finish()?;
+            (None, Some(value))
+        }
+    };
+    Ok(ValueDocumentReader {
+        input,
+        schema,
+        root,
+        item,
+        pending,
+        remaining: 0,
+        finished: false,
+    })
+}
+
 fn read_document<'de, T: Deserialize<'de>, I: Input<'de>>(input: &mut I) -> Result<T, AsonbError> {
     input.header()?;
     let schema = DocumentSchema::read(input)?;
@@ -543,6 +567,70 @@ pub struct ListStreamReader<T, R: Read> {
     marker: PhantomData<fn() -> T>,
 }
 
+/// Reads a dynamic document, streaming items only for a multi-chunk root List.
+pub struct ValueDocumentReader<R: Read> {
+    input: ReaderInput<R>,
+    schema: DocumentSchema,
+    root: Type,
+    item: Option<Type>,
+    pending: Option<Value<'static>>,
+    remaining: u64,
+    finished: bool,
+}
+
+impl<R: Read> ValueDocumentReader<R> {
+    pub fn schema(&self) -> &DocumentSchema {
+        &self.schema
+    }
+
+    pub fn root_type(&self) -> &Type {
+        &self.root
+    }
+
+    pub fn is_streaming_list(&self) -> bool {
+        self.item.is_some()
+    }
+}
+
+impl<R: Read> Iterator for ValueDocumentReader<R> {
+    type Item = Result<Value<'static>, AsonbError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        if let Some(value) = self.pending.take() {
+            self.finished = true;
+            return Some(Ok(value));
+        }
+        let Some(item_type) = &self.item else {
+            self.finished = true;
+            return None;
+        };
+        let result = (|| {
+            if self.remaining == 0 {
+                self.remaining = self.input.chunk(true)? as u64;
+                if self.remaining == 0 {
+                    return Ok(None);
+                }
+            }
+            self.remaining -= 1;
+            read_value(&mut self.input, &self.schema, item_type, false).map(Some)
+        })();
+        match result {
+            Ok(Some(value)) => Some(Ok(value)),
+            Ok(None) => {
+                self.finished = true;
+                None
+            }
+            Err(error) => {
+                self.finished = true;
+                Some(Err(error))
+            }
+        }
+    }
+}
+
 impl<T: de::DeserializeOwned, R: Read> Iterator for ListStreamReader<T, R> {
     type Item = Result<T, AsonbError>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -579,11 +667,36 @@ impl<T: de::DeserializeOwned, R: Read> Iterator for ListStreamReader<T, R> {
     }
 }
 impl<T: de::DeserializeOwned, R: Read> FusedIterator for ListStreamReader<T, R> {}
+impl<R: Read> FusedIterator for ValueDocumentReader<R> {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ser::{list_stream_writer, ser_to_bytes};
+
+    #[test]
+    fn test_dynamic_value_document_reader_streams_only_multichunk_lists() {
+        let list_schema =
+            DocumentSchema::new(Type::List(Encoding::MultiChunk, Box::new(Type::I32)));
+        let list_value = Value::List(vec![Value::I32(1), Value::I32(2)]);
+        let mut bytes = Vec::new();
+        crate::ser_value_to_writer(&list_schema, &list_value, &mut bytes).unwrap();
+        let mut reader = value_document_reader(bytes.as_slice()).unwrap();
+        assert!(reader.is_streaming_list());
+        assert_eq!(reader.next().unwrap().unwrap(), Value::I32(1));
+        assert_eq!(reader.next().unwrap().unwrap(), Value::I32(2));
+        assert!(reader.next().is_none());
+
+        let scalar_schema = DocumentSchema::new(Type::I32);
+        let scalar_value = Value::I32(9);
+        let mut bytes = Vec::new();
+        crate::ser_value_to_writer(&scalar_schema, &scalar_value, &mut bytes).unwrap();
+        let mut reader = value_document_reader(bytes.as_slice()).unwrap();
+        assert!(!reader.is_streaming_list());
+        assert_eq!(reader.next().unwrap().unwrap(), Value::I32(9));
+        assert!(reader.next().is_none());
+    }
+
     #[test]
     fn test_boolean_and_type_errors() {
         for byte in 0u8..=255 {
