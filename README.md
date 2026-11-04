@@ -1073,7 +1073,7 @@ Note that this example shows only the reference-type table; a complete document 
 
 The [ASON standard](https://github.com/hemashushu/ason/blob/main/docs/specification.md) governs conversion between ASON text and ASONB. The binary format does not extend ASON's text syntax or relax its value constraints.
 
-Conversion preserves values when ASON can represent them, but not source formatting, comments, or the choice of binary encoding form. Converting from ASON requires a schema supplied by the application or derived from the value where sufficient type information is available. Empty collections (empty Lists or Maps) are not type-inferred and are mapped to an empty List.
+Conversion preserves values when ASON can represent them, but not source formatting, comments, or the choice of binary encoding form. Converting from ASON requires a schema supplied by the application or derived from the value where sufficient type information is available. Empty collections (which may be empty Lists or Maps) that cannot be inferred from context are both mapped to an empty List of `i32`.
 
 When converting DateTime to ASON, timestamp ranges and nanosecond precision that ASON cannot represent are discarded without warning or error. UTC offsets are validated against the ASON DateTime limits.
 
