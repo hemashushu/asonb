@@ -4,6 +4,10 @@
 // the Mozilla Public License version 2.0 and additional exceptions.
 // For more details, see the LICENSE, LICENSE.additional, and CONTRIBUTING files.
 
+//! Schema-guided Serde encoding and forward-only root List production.
+//! Known-length containers write directly; unknown-length regular containers
+//! buffer only their own encoded payload until their count is available.
+
 use crate::{
     AsonbError, DocumentSchema, Encoding, Field, Schema, Type, Value, Variant,
     binary::{HEADER, ValueBuffer, write_all, write_u32},
@@ -12,8 +16,20 @@ use crate::{
 use serde::{Serialize, ser};
 use std::{io::Write, marker::PhantomData};
 
-/// Serialize a document without requiring a seekable writer. The schema is
-/// built before emitting bytes, including for empty containers.
+/// Serializes one complete document without requiring a seekable destination.
+///
+/// `value` supplies both its Serde payload and its static [`Schema`]. `writer`
+/// receives the header, schema, then payload; this function does not flush it.
+/// The schema is built and validated before any bytes are emitted, even for
+/// empty collections. Unsupported values and write failures return an error
+/// and may leave partial output. No size or nesting quota is imposed.
+///
+/// ```
+/// let mut output = Vec::new();
+/// asonb::ser_to_writer(&vec![10i32, 20], &mut output)?;
+/// assert_eq!(asonb::de_from_slice::<Vec<i32>>(&output)?, [10, 20]);
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
 pub fn ser_to_writer<T: Serialize + Schema + ?Sized, W: Write>(
     value: &T,
     writer: &mut W,
@@ -24,12 +40,40 @@ pub fn ser_to_writer<T: Serialize + Schema + ?Sized, W: Write>(
     value.serialize(&mut Serializer::new(writer, &schema, schema.root.clone()))
 }
 
+/// Serializes `value` into a newly allocated, complete ASONB document.
+///
+/// `T` must describe the same representation through [`Schema`] and Serde's
+/// `Serialize`. The returned bytes include the header and schema, not just the
+/// payload. Schema and value errors are the same as for [`ser_to_writer`].
+///
+/// ```
+/// let bytes = asonb::ser_to_bytes(&42u32)?;
+/// assert_eq!(asonb::de_from_slice::<u32>(&bytes)?, 42);
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
 pub fn ser_to_bytes<T: Serialize + Schema + ?Sized>(value: &T) -> Result<Vec<u8>, AsonbError> {
     let mut bytes = Vec::new();
     ser_to_writer(value, &mut bytes)?;
     Ok(bytes)
 }
 
+/// Creates an idle writer for a MultiChunk root List of `T` values.
+///
+/// `writer` is borrowed until the stream writer is dropped. Construction writes
+/// nothing and cannot fail: call [`ListStreamWriter::start_list`] to write the
+/// header and schema, then write values and explicitly end the list. Dropping
+/// the stream neither writes an end marker nor flushes the destination.
+///
+/// ```
+/// let mut bytes = Vec::new();
+/// let mut stream = asonb::list_stream_writer::<i32, _>(&mut bytes);
+/// stream.start_list()?;
+/// stream.write(&10)?;
+/// stream.writes(&[20, 30])?;
+/// stream.end_list()?;
+/// assert_eq!(asonb::de_from_slice::<Vec<i32>>(&bytes)?, [10, 20, 30]);
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
 pub fn list_stream_writer<T: Schema, W: Write>(writer: &mut W) -> ListStreamWriter<'_, W, T> {
     ListStreamWriter {
         writer,
@@ -43,21 +87,29 @@ pub fn list_stream_writer<T: Schema, W: Write>(writer: &mut W) -> ListStreamWrit
 /// but have their own type and nesting state, so nested containers do not
 /// overwrite the framing state of their parents.
 pub struct Serializer<'a, W: Write> {
+    /// Shared forward-only output; child serializers borrow it temporarily.
     writer: &'a mut W,
+    /// The complete validated document schema, shared by every child.
     schema: &'a DocumentSchema,
+    /// The expected type for this value, possibly a reference-table index.
     ty: Type,
 }
 
 impl<'a, W: Write> Serializer<'a, W> {
+    /// Attaches one expected type to the existing document and output cursor.
     pub(crate) fn new(writer: &'a mut W, schema: &'a DocumentSchema, ty: Type) -> Self {
         Self { writer, schema, ty }
     }
+    /// Resolves aliases before checking which Serde operation is allowed.
     fn ty(&self) -> Result<Type, AsonbError> {
         self.schema.resolve(self.ty.clone())
     }
+    /// Reuses dynamic-value validation and canonical scalar encoding.
     fn scalar(&mut self, value: Value<'_>) -> Result<(), AsonbError> {
         write_value(self.writer, self.schema, &self.ty, &value)
     }
+    /// Finds a variant by wire name, checks its shape, and writes its schema index.
+    /// Rust's supplied index is not authoritative when schema order differs.
     fn variant(&mut self, name: &str, form: u8) -> Result<Type, AsonbError> {
         let Type::Enum(_, variants) = self.ty()? else {
             return Err(AsonbError::Message(
@@ -85,26 +137,57 @@ impl<'a, W: Write> Serializer<'a, W> {
     }
 }
 
+/// The per-container interpretation used after resolving its document type.
 enum Kind {
-    Sequence(Encoding, Type),
-    Map(bool, Type, Type),
-    Tuple(Vec<Type>),
-    Object(Vec<Field>),
+    /// Homogeneous elements with their count framing and shared element type.
+    Sequence(
+        /// Count framing.
+        Encoding,
+        /// Element schema.
+        Type,
+    ),
+    /// Alternating keys and values; the Boolean selects u64 rather than u32 counts.
+    Map(
+        /// Whether to use long counts.
+        bool,
+        /// Key schema.
+        Type,
+        /// Value schema.
+        Type,
+    ),
+    /// Positional children, each with its own type.
+    Tuple(
+        /// Types in serialized order.
+        Vec<Type>,
+    ),
+    /// Named children, validated against schema order as they arrive from Serde.
+    Object(
+        /// Ordered field descriptions.
+        Vec<Field>,
+    ),
+    /// The date adapter's private one-i64 tuple, not a document Tuple type.
     DateTime,
 }
 
 /// Per-container count and ordering validation. Only an unknown-length regular
 /// sequence/map buffers its own payload to put the count before the bytes.
 pub struct Compound<'a, 'w, W: Write> {
+    /// Parent serializer, including its shared output and document references.
     serializer: &'a mut Serializer<'w, W>,
+    /// Shape and child types for this container only.
     kind: Kind,
+    /// Completed elements, fields, or key/value pairs; never half-written pairs.
     count: usize,
+    /// Serde's promised count, or None when the producer cannot know it yet.
     expected: Option<usize>,
+    /// True after a Map key has been written and before its value arrives.
     pending: bool,
+    /// Deferred bytes for a regular/long container whose count is unknown.
     buffer: Option<ValueBuffer>,
 }
 
 impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
+    /// Checks the shape and emits a known count, or chooses a local buffer.
     fn new(
         serializer: &'a mut Serializer<'w, W>,
         ty: Type,
@@ -117,6 +200,8 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
                     if let Some(length) = length {
                         write_length(serializer.writer, &encoding, length as u64)?;
                     } else if matches!(encoding, Encoding::Regular | Encoding::Long) {
+                        // Forward-only output cannot backpatch a count. Delay
+                        // this payload, not the entire surrounding document.
                         buffer = Some(ValueBuffer { bytes: Vec::new() });
                     }
                 }
@@ -171,6 +256,7 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
         })
     }
 
+    /// Writes a child to this container's buffer or directly to the shared sink.
     fn child<T: Serialize + ?Sized>(&mut self, ty: Type, value: &T) -> Result<(), AsonbError> {
         let serializer = &mut self.serializer;
         let result = if let Some(buffer) = &mut self.buffer {
@@ -186,6 +272,7 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
         Ok(())
     }
 
+    /// Writes a positional child after checking the next expected element type.
     fn element<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), AsonbError> {
         if self.expected.is_some_and(|expected| self.count >= expected) {
             return Err(AsonbError::Message("Too many elements.".into()));
@@ -193,6 +280,8 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
         let ty = match &self.kind {
             Kind::Sequence(encoding, ty) => {
                 if *encoding == Encoding::MultiChunk {
+                    // A one-element chunk lets an unknown-length sequence make
+                    // progress without buffering or guessing its final count.
                     write_u32(self.serializer.writer, 1)?;
                 }
                 ty.clone()
@@ -210,6 +299,7 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
         Ok(())
     }
 
+    /// Requires the next Serde field name to match the next schema field exactly.
     fn field<T: Serialize + ?Sized>(&mut self, name: &str, value: &T) -> Result<(), AsonbError> {
         let Kind::Object(fields) = &self.kind else {
             return Err(AsonbError::Message("Expected Object fields.".into()));
@@ -228,6 +318,7 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
         Ok(())
     }
 
+    /// Starts a pair, rejecting consecutive keys and counts above Serde's promise.
     fn key<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), AsonbError> {
         if self.pending {
             return Err(AsonbError::Message("Map value is missing.".into()));
@@ -243,6 +334,7 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
         Ok(())
     }
 
+    /// Completes the pending pair and only then increments the pair count.
     fn map_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), AsonbError> {
         if !self.pending {
             return Err(AsonbError::Message("Map key is missing.".into()));
@@ -256,6 +348,7 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
         Ok(())
     }
 
+    /// Checks completeness, releases buffered bytes, or writes a chunk terminator.
     fn finish(self) -> Result<(), AsonbError> {
         if self.pending || self.expected.is_some_and(|expected| expected != self.count) {
             return Err(AsonbError::Message("Incomplete container.".into()));
@@ -281,7 +374,11 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
     }
 }
 
-macro_rules! serialize_numbers {($($method:ident,$rust:ty,$variant:ident);* $(;)?)=>{$(fn $method(self,value:$rust)->Result<(),AsonbError>{self.scalar(Value::$variant(value))})*};}
+/// Routes Serde scalar callbacks through the shared exact-type value encoder.
+macro_rules! serialize_numbers {($($method:ident,$rust:ty,$variant:ident);* $(;)?)=>{$(
+    /// Writes this scalar only if its wire type matches the expected schema.
+    fn $method(self,value:$rust)->Result<(),AsonbError>{self.scalar(Value::$variant(value))}
+)*};}
 
 impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
     type Ok = ();
@@ -294,29 +391,37 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
     type SerializeStruct = Compound<'a, 'w, W>;
     type SerializeStructVariant = Compound<'a, 'w, W>;
     serialize_numbers!(serialize_i8,i8,I8;serialize_i16,i16,I16;serialize_i32,i32,I32;serialize_i64,i64,I64;serialize_u8,u8,U8;serialize_u16,u16,U16;serialize_u64,u64,U64;serialize_f32,f32,F32;serialize_f64,f64,F64;serialize_bool,bool,Bool;serialize_char,char,Char);
+    /// Writes an exact-width unsigned value, without widening or narrowing.
     fn serialize_u32(self, value: u32) -> Result<(), AsonbError> {
         self.scalar(Value::U32(value))
     }
+    /// Uses the schema's String framing rather than Serde's sequence mapping.
     fn serialize_str(self, value: &str) -> Result<(), AsonbError> {
         self.scalar(Value::String(value.into()))
     }
+    /// Writes Byte Data, which is intentionally distinct from List<u8>.
     fn serialize_bytes(self, value: &[u8]) -> Result<(), AsonbError> {
         self.scalar(Value::Bytes(value.into()))
     }
+    /// Selects the unit None variant by name.
     fn serialize_none(self) -> Result<(), AsonbError> {
         self.variant("None", 0)?;
         Ok(())
     }
+    /// Selects Some and encodes its single payload with the variant's type.
     fn serialize_some<T: Serialize + ?Sized>(self, value: &T) -> Result<(), AsonbError> {
         let ty = self.variant("Some", 1)?;
         value.serialize(&mut Serializer::new(self.writer, self.schema, ty))
     }
+    /// Rejects standalone unit, for which ASONB has no valid root type.
     fn serialize_unit(self) -> Result<(), AsonbError> {
         Err(AsonbError::Message("Unit is unsupported.".into()))
     }
+    /// Rejects Rust unit structs rather than treating them as empty Objects.
     fn serialize_unit_struct(self, _name: &'static str) -> Result<(), AsonbError> {
         Err(AsonbError::Message("Unit structs are unsupported.".into()))
     }
+    /// Emits only a unit variant's schema index; there is no payload to write.
     fn serialize_unit_variant(
         self,
         _name: &'static str,
@@ -326,6 +431,7 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
         self.variant(variant, 0)?;
         Ok(())
     }
+    /// Allows only the private DateTime marker, not arbitrary newtype structs.
     fn serialize_newtype_struct<T: Serialize + ?Sized>(
         self,
         name: &'static str,
@@ -342,6 +448,7 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
             ))
         }
     }
+    /// Checks a newtype variant's wire name and serializes its single value.
     fn serialize_newtype_variant<T: Serialize + ?Sized>(
         self,
         _name: &'static str,
@@ -352,6 +459,7 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
         let ty = self.variant(variant, 1)?;
         value.serialize(&mut Serializer::new(self.writer, self.schema, ty))
     }
+    /// Requires a List and preserves whether Serde knows its element count.
     fn serialize_seq(self, length: Option<usize>) -> Result<Self::SerializeSeq, AsonbError> {
         let ty = self.ty()?;
         if !matches!(ty, Type::List(..)) {
@@ -359,6 +467,7 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
         }
         Compound::new(self, ty, length)
     }
+    /// Checks tuple arity, also handling the DateTime adapter's private tuple.
     fn serialize_tuple(self, length: usize) -> Result<Self::SerializeTuple, AsonbError> {
         let ty = self.ty()?;
         if !matches!(ty, Type::Tuple(_) | Type::DateTime) {
@@ -366,6 +475,7 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
         }
         Compound::new(self, ty, Some(length))
     }
+    /// Rejects tuple structs, which are not part of the supported Rust mapping.
     fn serialize_tuple_struct(
         self,
         _name: &'static str,
@@ -373,6 +483,7 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
     ) -> Result<Self::SerializeTupleStruct, AsonbError> {
         Err(AsonbError::Message("Tuple structs are unsupported.".into()))
     }
+    /// Selects a tuple variant before writing its fixed positional payload.
     fn serialize_tuple_variant(
         self,
         _name: &'static str,
@@ -383,6 +494,7 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
         let ty = self.variant(variant, 2)?;
         Compound::new(self, ty, Some(length))
     }
+    /// Requires a Map and chooses direct or buffered pair-count framing.
     fn serialize_map(self, length: Option<usize>) -> Result<Self::SerializeMap, AsonbError> {
         let ty = self.ty()?;
         if !matches!(ty, Type::Map(..)) {
@@ -390,6 +502,7 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
         }
         Compound::new(self, ty, length)
     }
+    /// Requires an Object with exactly the number of fields Serde will emit.
     fn serialize_struct(
         self,
         _name: &'static str,
@@ -401,6 +514,7 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
         }
         Compound::new(self, ty, Some(length))
     }
+    /// Selects a struct variant and checks its named payload's field count.
     fn serialize_struct_variant(
         self,
         _name: &'static str,
@@ -411,19 +525,23 @@ impl<'a, 'w, W: Write> ser::Serializer for &'a mut Serializer<'w, W> {
         let ty = self.variant(variant, 4)?;
         Compound::new(self, ty, Some(length))
     }
+    /// Requests Serde's binary representations from format-aware adapters.
     fn is_human_readable(&self) -> bool {
         false
     }
 }
 
+/// Shares positional writing between Serde's sequence and tuple traits.
 macro_rules! sequence_impl {
     ($trait:ident,$method:ident) => {
         impl<W: Write> ser::$trait for Compound<'_, '_, W> {
             type Ok = ();
             type Error = AsonbError;
+            /// Writes the next positional child using this container's schema.
             fn $method<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), AsonbError> {
                 self.element(value)
             }
+            /// Verifies the count and emits any deferred framing or payload.
             fn end(self) -> Result<(), AsonbError> {
                 self.finish()
             }
@@ -434,11 +552,13 @@ sequence_impl!(SerializeSeq, serialize_element);
 sequence_impl!(SerializeTuple, serialize_element);
 sequence_impl!(SerializeTupleStruct, serialize_field);
 sequence_impl!(SerializeTupleVariant, serialize_field);
+/// Shares named-field writing between ordinary Objects and struct variants.
 macro_rules! object_impl {
     ($trait:ident) => {
         impl<W: Write> ser::$trait for Compound<'_, '_, W> {
             type Ok = ();
             type Error = AsonbError;
+            /// Validates the field's wire name before encoding its value.
             fn serialize_field<T: Serialize + ?Sized>(
                 &mut self,
                 key: &'static str,
@@ -446,6 +566,7 @@ macro_rules! object_impl {
             ) -> Result<(), AsonbError> {
                 self.field(key, value)
             }
+            /// Rejects missing fields and finalizes this container's framing.
             fn end(self) -> Result<(), AsonbError> {
                 self.finish()
             }
@@ -457,40 +578,72 @@ object_impl!(SerializeStructVariant);
 impl<W: Write> ser::SerializeMap for Compound<'_, '_, W> {
     type Ok = ();
     type Error = AsonbError;
+    /// Starts the next key/value pair, enforcing key/value alternation.
     fn serialize_key<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), AsonbError> {
         self.key(value)
     }
+    /// Writes the value belonging to the pending key.
     fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), AsonbError> {
         self.map_value(value)
     }
+    /// Rejects a dangling key or wrong count before completing the Map.
     fn end(self) -> Result<(), AsonbError> {
         self.finish()
     }
 }
 
 #[derive(PartialEq, Eq)]
+/// Legal lifecycle states for a forward-only root List writer.
 enum StreamState {
+    /// No header or schema has been emitted yet.
     NotStarted,
+    /// Header and schema are complete, and another chunk or terminator is legal.
     Open,
+    /// The explicit zero-count terminator was written successfully.
     Finished,
+    /// An operation may have emitted partial bytes; further writes are unsafe.
     Failed,
 }
 
 /// A forward-only root List writer. Drop does not write an end marker.
+///
+/// Create it with [`list_stream_writer`], call `start_list` once, write any
+/// number of chunks, then call `end_list`. Failed output operations permanently
+/// close the writer because a partially emitted chunk cannot be undone. This
+/// type never flushes the underlying destination automatically.
 pub struct ListStreamWriter<'a, W: Write, T> {
+    /// Borrowed sink, used directly without seeking or whole-list buffering.
     writer: &'a mut W,
+    /// The validated element definitions plus their MultiChunk List root.
     schema: Option<DocumentSchema>,
+    /// Guards ordering and prevents reuse after potentially partial writes.
     state: StreamState,
+    /// Ties the stream's API to T without storing or owning a T value.
     marker: PhantomData<fn(&T)>,
 }
 
 impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
+    /// Writes the header and element schema, opening this root List.
+    ///
+    /// There are no arguments. Call exactly once before writing values. Schema
+    /// errors and I/O failures leave the stream unusable; a repeated call also
+    /// returns an error. This does not write any elements or flush the sink.
+    ///
+    /// ```
+    /// let mut bytes = Vec::new();
+    /// let mut stream = asonb::list_stream_writer::<u32, _>(&mut bytes);
+    /// stream.start_list()?;
+    /// stream.end_list()?; // An empty, explicitly terminated List.
+    /// # Ok::<(), asonb::AsonbError>(())
+    /// ```
     pub fn start_list(&mut self) -> Result<(), AsonbError> {
         if self.state != StreamState::NotStarted {
             return Err(AsonbError::Message(
                 "List stream has already started.".into(),
             ));
         }
+        // Poison before touching output. Only a fully successful operation may
+        // restore a usable state; unwinding or an early error leaves it closed.
         self.state = StreamState::Failed;
         let mut schema = DocumentSchema::of::<T>()?;
         schema.root = Type::List(Encoding::MultiChunk, Box::new(schema.root));
@@ -501,8 +654,21 @@ impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
         Ok(())
     }
 
-    /// Writes a single value as one chunk in the root list.
-    /// Returns an error if the list is not open.
+    /// Writes `value` as a one-element chunk without buffering the whole List.
+    ///
+    /// The List must be open. The borrowed value must serialize according to
+    /// `T`'s schema. Serialization or I/O errors can leave a partial chunk and
+    /// permanently disable further writes. The destination is not flushed.
+    ///
+    /// ```
+    /// # let mut bytes = Vec::new();
+    /// # let mut stream = asonb::list_stream_writer::<i32, _>(&mut bytes);
+    /// # stream.start_list()?;
+    /// stream.write(&42)?;
+    /// # stream.end_list()?;
+    /// # assert_eq!(asonb::de_from_slice::<Vec<i32>>(&bytes)?, [42]);
+    /// # Ok::<(), asonb::AsonbError>(())
+    /// ```
     pub fn write(&mut self, value: &T) -> Result<(), AsonbError>
     where
         T: Serialize,
@@ -524,8 +690,23 @@ impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
         Ok(())
     }
 
-    /// Writes multiple values as one chunk in the root list.
-    /// Returns an error if the list is not open.
+    /// Writes the borrowed `values` slice as one chunk, keeping element order.
+    ///
+    /// An empty slice writes nothing: a zero count would terminate the List.
+    /// The stream must be open, and nonempty slices must fit a u32 chunk count.
+    /// Count, serialization, or I/O failures leave the stream unusable; no
+    /// flush is performed.
+    ///
+    /// ```
+    /// # let mut bytes = Vec::new();
+    /// # let mut stream = asonb::list_stream_writer::<i32, _>(&mut bytes);
+    /// # stream.start_list()?;
+    /// stream.writes(&[10, 20, 30])?;
+    /// stream.writes(&[])?; // No chunk and no end marker are written.
+    /// # stream.end_list()?;
+    /// # assert_eq!(asonb::de_from_slice::<Vec<i32>>(&bytes)?, [10, 20, 30]);
+    /// # Ok::<(), asonb::AsonbError>(())
+    /// ```
     pub fn writes(&mut self, values: &[T]) -> Result<(), AsonbError>
     where
         T: Serialize,
@@ -552,8 +733,20 @@ impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
         Ok(())
     }
 
-    /// Ends the root list by writing an explicit end marker.
-    /// Returns an error if the list is not open.
+    /// Writes the zero-count end marker and prevents any further chunks.
+    ///
+    /// There are no arguments. Only an open stream can be ended, and a failed
+    /// marker write leaves it unusable. This does not flush the destination;
+    /// flush a buffered writer yourself after releasing the stream's borrow.
+    ///
+    /// ```
+    /// # let mut bytes = Vec::new();
+    /// # let mut stream = asonb::list_stream_writer::<i32, _>(&mut bytes);
+    /// # stream.start_list()?;
+    /// stream.end_list()?;
+    /// assert!(stream.write(&1).is_err());
+    /// # Ok::<(), asonb::AsonbError>(())
+    /// ```
     pub fn end_list(&mut self) -> Result<(), AsonbError> {
         if self.state != StreamState::Open {
             return Err(AsonbError::Message("List stream is not open.".into()));
@@ -569,6 +762,7 @@ impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
 mod tests {
     use super::*;
     #[test]
+    /// Locks down primitive framing, embedded NUL handling, and canonical NaN.
     fn test_primitive_bytes() {
         assert_eq!(
             ser_to_bytes(&0x42i32).unwrap(),
@@ -599,6 +793,7 @@ mod tests {
         );
     }
     #[test]
+    /// Checks legal/illegal transitions, batched chunks, and empty batch behavior.
     fn test_stream_states() {
         let mut output = Vec::new();
         let mut stream = list_stream_writer::<i32, _>(&mut output);
@@ -637,9 +832,11 @@ mod tests {
         );
     }
 
+    /// Generates byte-exact minimum/zero/maximum tests for each integer width.
     macro_rules! integer_test {
         ($name:ident,$rust:ty) => {
             #[test]
+            /// Checks this integer width's little-endian bytes and round trip.
             fn $name() {
                 for value in [<$rust>::MIN, 0, <$rust>::MAX] {
                     let bytes = ser_to_bytes(&value).unwrap();
@@ -659,6 +856,7 @@ mod tests {
     integer_test!(test_u64, u64);
 
     #[test]
+    /// Preserves signed zero and subnormals while canonicalizing all NaN payloads.
     fn test_floating_point_bits() {
         for value in [
             0.0f32,
@@ -691,6 +889,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks scalar-code-point encoding, including non-ASCII boundary values.
     fn test_character_bytes() {
         for value in ['\0', 'B', '文', '\u{d7ff}', '\u{e000}', '\u{10ffff}'] {
             assert_eq!(
@@ -700,13 +899,16 @@ mod tests {
         }
     }
 
+    /// A producer that deliberately does not announce its sequence length.
     struct UnknownLength;
     impl Schema for UnknownLength {
+        /// The schema still knows the element type before any value is visited.
         fn schema(builder: &mut crate::SchemaBuilder) -> Result<Type, AsonbError> {
             Vec::<String>::schema(builder)
         }
     }
     impl Serialize for UnknownLength {
+        /// Forces the regular List encoder to buffer until the final count is known.
         fn serialize<S: ser::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             use ser::SerializeSeq;
             let mut seq = serializer.serialize_seq(None)?;
@@ -717,6 +919,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that unknown-length buffering produces the same complete document.
     fn test_unknown_length_buffer() {
         let bytes = ser_to_bytes(&UnknownLength).unwrap();
         assert_eq!(
@@ -729,6 +932,7 @@ mod tests {
     }
 
     #[test]
+    /// Exercises short writes, WriteZero, injected failure, and stream poisoning.
     fn test_partial_and_failed_writes() {
         use crate::test_utils::FaultWriter;
         let mut writer = FaultWriter::default();

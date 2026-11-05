@@ -26,6 +26,53 @@
 //! # Ok::<(), asonb::AsonbError>(())
 //! ```
 //!
+//! # Choosing an API
+//!
+//! Use [`ser_to_bytes`] or [`ser_to_writer`] for ordinary Serde values. Derive
+//! [`Schema`] alongside Serde's traits for named structs and enumerations:
+//!
+//! ```
+//! #[derive(serde::Serialize, serde::Deserialize, asonb::Schema)]
+//! struct Reading {
+//!     sensor_id: u32,
+//!     temperature: f64,
+//! }
+//! let bytes = asonb::ser_to_bytes(&Reading { sensor_id: 7, temperature: 21.5 })?;
+//! let decoded: Reading = asonb::de_from_slice(&bytes)?;
+//! assert_eq!(decoded.sensor_id, 7);
+//! # Ok::<(), asonb::AsonbError>(())
+//! ```
+//!
+//! Each document contains a header, a complete [`DocumentSchema`], and a root
+//! payload. The schema describes types rather than instances: empty Lists still
+//! know their element type, and enums still describe unselected branches. This
+//! is why serialization needs [`Schema`] as well as Serde's `Serialize`, while
+//! a reader needs only a compatible `Deserialize` implementation. A reference
+//! table reuses type descriptions; it never encodes shared object identity.
+//!
+//! Use [`list_stream_writer`] and [`list_stream_reader`] for a producer/consumer
+//! pipeline whose total element count is not known in advance. These operate on
+//! a MultiChunk root List. Writers require an explicit start and end; readers
+//! stop at the marker without probing bytes from a following document.
+//! [`value_document_reader`] makes the same List/non-List distinction while
+//! returning dynamic values rather than a predetermined Rust type.
+//!
+//! Use [`Value`] with [`DocumentSchema`] when the application must choose Long
+//! or MultiChunk framing explicitly or inspect data without a Rust model.
+//! [`ser_value_to_writer`] checks that the supplied value matches that schema;
+//! [`de_value_from_slice`] can borrow contiguous text and byte payloads.
+//!
+//! # Representation Choices
+//!
+//! Rust arrays use positional Tuples by default. The [`mod@array`] adapter selects
+//! homogeneous Lists and checks the array length when reading. Ordinary `Vec<u8>`
+//! also means a List; use `serde_bytes` for Byte Data. The [`date_time`] adapter
+//! selects an eight-byte UTC timestamp rather than chrono's usual Serde string.
+//! Adapters and handwritten Serde implementations must agree with their schema;
+//! custom field encodings can supply `#[asonb(schema_with = "path")]`.
+//!
+//! # Errors and Resource Policy
+//!
 //! Schemas and values have no library-imposed depth, size, count, or buffer
 //! quota. Recursive Rust schemas and cyclic document schema references are
 //! rejected. Platform capacity, allocation failures, and wire framing are still
@@ -33,6 +80,9 @@
 //! Single-document readers check EOF and can block on live sources; list
 //! streaming stops at its marker.
 //! This crate does not implement ASON text conversion or graph/pointer identity.
+//! Read failures use [`AsonbError`] and include a byte offset when one is known.
+//! Write failures can leave partial output, so discard or otherwise handle that
+//! output rather than assuming a failed write was rolled back.
 
 pub mod array;
 pub mod date_time;

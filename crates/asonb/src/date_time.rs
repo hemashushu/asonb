@@ -23,26 +23,61 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// document contains the DateTime type definition and its 8-byte payload.
 pub(crate) const MARKER: &str = "$asonb::DateTime";
 
-/// A root-friendly chrono value with a binary rather than text Serde mapping.
+/// A chrono timestamp that uses ASONB's binary DateTime representation.
+///
+/// The wire stores signed seconds since the Unix epoch, not the original UTC
+/// offset. Reading therefore returns the same instant at offset `+00:00`.
+/// Fractional seconds, leap seconds, and offsets outside ASON's minute-aligned
+/// range are rejected rather than rounded or silently changed.
+///
+/// ```
+/// let instant = chrono::DateTime::parse_from_rfc3339("2026-01-01T08:00:00+08:00")?;
+/// let bytes = asonb::ser_to_bytes(&asonb::date_time::DateTime(instant))?;
+/// let decoded: asonb::date_time::DateTime = asonb::de_from_slice(&bytes)?;
+/// assert_eq!(decoded.0.to_rfc3339(), "2026-01-01T00:00:00+00:00");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DateTime(pub ChronoDateTime<FixedOffset>);
+pub struct DateTime(
+    /// The instant to encode, or the UTC-normalized instant just decoded.
+    pub ChronoDateTime<FixedOffset>,
+);
 
 impl Schema for DateTime {
+    /// Selects the scalar DateTime schema; no reference entries are needed.
     fn schema(_: &mut SchemaBuilder) -> Result<Type, AsonbError> {
         Ok(Type::DateTime)
     }
 }
 impl Serialize for DateTime {
+    /// Passes the wrapped timestamp through the field adapter's validation.
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serialize(&self.0, serializer)
     }
 }
 impl<'de> Deserialize<'de> for DateTime {
+    /// Reads the binary timestamp and wraps the resulting UTC chrono value.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserialize(deserializer).map(Self)
     }
 }
 
+/// Writes a chrono value through ASONB's DateTime-specific Serde path.
+///
+/// `value` supplies the instant and the offset to validate. `serializer` is the
+/// destination provided by Serde. Only whole seconds and valid ASON UTC offsets
+/// are accepted. The original offset is not written to the document.
+///
+/// ```
+/// #[derive(serde::Serialize, asonb::Schema)]
+/// struct Event {
+///     #[serde(with = "asonb::date_time")]
+///     at: chrono::DateTime<chrono::FixedOffset>,
+/// }
+/// let event = Event { at: chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")? };
+/// let bytes = asonb::ser_to_bytes(&event)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn serialize<S: Serializer>(
     value: &ChronoDateTime<FixedOffset>,
     serializer: S,
@@ -55,18 +90,42 @@ pub fn serialize<S: Serializer>(
     if !crate::value::is_valid_ason_utc_offset(value.offset().local_minus_utc()) {
         return Err(serde::ser::Error::custom("Invalid ASON UTC offset."));
     }
+    // The marker selects DateTime handling. The one-element tuple carries the
+    // i64 through Serde without exposing a custom serializer trait to callers.
     serializer.serialize_newtype_struct(MARKER, &(value.timestamp(),))
 }
 
+/// Reads a binary DateTime as a chrono value with a zero UTC offset.
+///
+/// `deserializer` must support the DateTime newtype marker used by this adapter.
+/// The wire timestamp must fit chrono's narrower supported date range; raw
+/// [`crate::Value::DateTime`] can represent timestamps that chrono cannot.
+/// Invalid input and out-of-range timestamps return a Serde error.
+///
+/// ```
+/// #[derive(serde::Serialize, serde::Deserialize, asonb::Schema)]
+/// struct Event {
+///     #[serde(with = "asonb::date_time")]
+///     at: chrono::DateTime<chrono::FixedOffset>,
+/// }
+/// let event = Event { at: chrono::DateTime::parse_from_rfc3339("2026-01-01T08:00:00+08:00")? };
+/// let bytes = asonb::ser_to_bytes(&event)?;
+/// let decoded: Event = asonb::de_from_slice(&bytes)?;
+/// assert_eq!(decoded.at.offset().local_minus_utc(), 0);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn deserialize<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<ChronoDateTime<FixedOffset>, D::Error> {
+    /// Converts the adapter's private one-element tuple into a chrono instant.
     struct Visitor;
     impl<'de> serde::de::Visitor<'de> for Visitor {
         type Value = ChronoDateTime<FixedOffset>;
+        /// Describes the expected value in Serde's type-mismatch errors.
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
             formatter.write_str("an ASONB DateTime")
         }
+        /// Checks chrono's range after the wire-level i64 has been decoded.
         fn visit_newtype_struct<D: Deserializer<'de>>(
             self,
             deserializer: D,
@@ -86,6 +145,7 @@ pub fn deserialize<'de, D: Deserializer<'de>>(
 mod tests {
     use super::*;
     #[test]
+    /// Checks that explicit adapters select scalars rather than Serde strings/lists.
     fn test_schema() {
         assert_eq!(
             crate::DocumentSchema::of::<DateTime>().unwrap().root,
@@ -100,6 +160,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks UTC normalization, negative timestamps, and every truncated prefix.
     fn test_binary_round_trips() {
         for seconds in [-1, 0, 1] {
             for offset in [-86_340, 0, 28_800, 86_340] {
@@ -124,6 +185,7 @@ mod tests {
     }
 
     #[test]
+    /// Keeps wire-range support separate from chrono and ASON offset restrictions.
     fn test_invalid_and_unrepresentable_date_times() {
         let bytes = crate::test_utils::document(Type::DateTime, &i64::MAX.to_le_bytes());
         assert!(crate::de_from_slice::<DateTime>(&bytes).is_err());

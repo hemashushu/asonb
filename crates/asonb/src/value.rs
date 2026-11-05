@@ -15,35 +15,137 @@ use std::{
     io::{Read, Write},
 };
 
+/// ASON permits minute-aligned offsets through 23:59 in either direction.
 const MAX_ASON_UTC_OFFSET_SECONDS: i32 = 23 * 60 * 60 + 59 * 60;
 
 /// A value interpreted according to a separate document schema.
+///
+/// Container values do not repeat field names, element types, or encoding modes:
+/// those belong to [`DocumentSchema`]. Strings and bytes may borrow from a slice
+/// document; containers own their child storage. Enum indices refer to schema
+/// order, not Rust discriminant values.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value<'de> {
-    I8(i8),
-    I16(i16),
-    I32(i32),
-    I64(i64),
-    U8(u8),
-    U16(u16),
-    U32(u32),
-    U64(u64),
-    F32(f32),
-    F64(f64),
-    Bool(bool),
-    Char(char),
-    DateTime(i64),
-    String(Cow<'de, str>),
-    Bytes(Cow<'de, [u8]>),
-    List(Vec<Value<'de>>),
-    Map(Vec<(Value<'de>, Value<'de>)>),
-    Tuple(Vec<Value<'de>>),
-    Object(Vec<Value<'de>>),
-    Enum(u32, Box<Value<'de>>),
+    /// A signed 8-bit payload, matching Type::I8 exactly.
+    I8(
+        /// The integer value.
+        i8,
+    ),
+    /// A signed 16-bit payload.
+    I16(
+        /// The integer value.
+        i16,
+    ),
+    /// A signed 32-bit payload.
+    I32(
+        /// The integer value.
+        i32,
+    ),
+    /// A signed 64-bit payload.
+    I64(
+        /// The integer value.
+        i64,
+    ),
+    /// An unsigned 8-bit payload, not a byte-data container.
+    U8(
+        /// The integer value.
+        u8,
+    ),
+    /// An unsigned 16-bit payload.
+    U16(
+        /// The integer value.
+        u16,
+    ),
+    /// An unsigned 32-bit payload.
+    U32(
+        /// The integer value.
+        u32,
+    ),
+    /// An unsigned 64-bit payload.
+    U64(
+        /// The integer value.
+        u64,
+    ),
+    /// A single-precision value; writing normalizes NaN to a canonical quiet NaN.
+    F32(
+        /// The floating-point value.
+        f32,
+    ),
+    /// A double-precision value; writing normalizes NaN to a canonical quiet NaN.
+    F64(
+        /// The floating-point value.
+        f64,
+    ),
+    /// A Boolean; writers use zero or one, while readers accept any nonzero byte.
+    Bool(
+        /// The logical value.
+        bool,
+    ),
+    /// A Unicode scalar, never an isolated surrogate or an arbitrary u32.
+    Char(
+        /// The decoded character.
+        char,
+    ),
+    /// Whole UTC seconds since the Unix epoch, covering the full wire i64 range.
+    DateTime(
+        /// Seconds, with negative values before the epoch.
+        i64,
+    ),
+    /// Valid UTF-8, borrowed only when the input storage can be reused directly.
+    String(
+        /// Text without a trailing NUL requirement.
+        Cow<'de, str>,
+    ),
+    /// Opaque bytes; unlike String, no UTF-8 validation is performed.
+    Bytes(
+        /// Borrowed or owned byte data.
+        Cow<'de, [u8]>,
+    ),
+    /// Homogeneous elements whose common type comes from the schema.
+    List(
+        /// Elements in wire order, with chunk boundaries removed.
+        Vec<Value<'de>>,
+    ),
+    /// Key/value pairs kept in wire order without imposing Rust map semantics.
+    Map(
+        /// Ordered pairs; duplicate keys are not removed.
+        Vec<(Value<'de>, Value<'de>)>,
+    ),
+    /// Positional values, also used as an empty payload for a unit enum variant.
+    Tuple(
+        /// One value for each tuple position.
+        Vec<Value<'de>>,
+    ),
+    /// Field values without names; their order must match the schema's fields.
+    Object(
+        /// One value for each field in schema order.
+        Vec<Value<'de>>,
+    ),
+    /// A selected variant and its shape-specific payload.
+    Enum(
+        /// Zero-based index into the schema's variant list.
+        u32,
+        /// Empty Tuple for unit, the value for newtype, Tuple or Object otherwise.
+        Box<Value<'de>>,
+    ),
 }
 
-/// Write one document using an explicit schema. Errors can leave partial
-/// output in the writer; arbitrary Write sources cannot be rolled back.
+/// Writes a complete document using a caller-selected schema and dynamic value.
+///
+/// `schema` supplies types, field order, and framing. `value` must match it
+/// exactly; numeric widths are not coerced. `writer` receives the header, schema,
+/// and payload, but is not flushed. Invalid schemas are rejected before writing.
+/// Value mismatches and I/O failures can leave partial output: arbitrary writers
+/// cannot be rolled back. There are no library-imposed size or depth quotas.
+///
+/// ```
+/// use asonb::{DocumentSchema, Encoding, Type, Value};
+/// let schema = DocumentSchema::new(Type::String(Encoding::Long));
+/// let mut bytes = Vec::new();
+/// asonb::ser_value_to_writer(&schema, &Value::String("hello".into()), &mut bytes)?;
+/// assert_eq!(asonb::de_value_from_slice(&bytes)?.1, Value::String("hello".into()));
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
 pub fn ser_value_to_writer(
     schema: &DocumentSchema,
     value: &Value<'_>,
@@ -55,20 +157,46 @@ pub fn ser_value_to_writer(
     write_value(writer, schema, &schema.root, value)
 }
 
-/// Read a finite document. Checking for trailing bytes may block on a live
-/// source; use a list stream reader for producer-consumer pipelines.
+/// Reads one finite document into its schema and an entirely owned value tree.
+///
+/// `reader` starts at the document header and is consumed by this call. The
+/// returned value has no borrow from the source. Invalid schemas, malformed
+/// payloads, I/O errors, and trailing bytes are rejected. The EOF check may block
+/// on a live source; use [`crate::list_stream_reader`] for pipelines instead.
+///
+/// ```
+/// let bytes = asonb::ser_to_bytes(&42i32)?;
+/// let (schema, value) = asonb::de_value_from_reader(bytes.as_slice())?;
+/// assert_eq!(schema.root, asonb::Type::I32);
+/// assert_eq!(value, asonb::Value::I32(42));
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
 pub fn de_value_from_reader(
     reader: impl Read,
 ) -> Result<(DocumentSchema, Value<'static>), AsonbError> {
     read_document(&mut ReaderInput::new(reader))
 }
 
-/// Contiguous payloads borrow from the source; chunked payloads are joined
-/// into an owned allocation. This API never uses unaligned native references.
+/// Reads one complete document, borrowing contiguous string and byte payloads.
+///
+/// `bytes` must contain exactly one document, including its header. Returned
+/// borrows remain valid only while this slice lives. Chunked text and byte data
+/// are joined into owned storage; schemas and container vectors are also owned.
+/// Malformed input and trailing bytes return an error. Numeric values are copied
+/// from little-endian bytes, never viewed through unaligned native references.
+///
+/// ```
+/// use std::borrow::Cow;
+/// let bytes = asonb::ser_to_bytes(&"hello")?;
+/// let (_, value) = asonb::de_value_from_slice(&bytes)?;
+/// assert!(matches!(value, asonb::Value::String(Cow::Borrowed("hello"))));
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
 pub fn de_value_from_slice(bytes: &[u8]) -> Result<(DocumentSchema, Value<'_>), AsonbError> {
     read_document(&mut SliceInput::new(bytes))
 }
 
+/// Shares header/schema/value/EOF checks across borrowed and owned input sources.
 fn read_document<'de>(
     input: &mut impl Input<'de>,
 ) -> Result<(DocumentSchema, Value<'de>), AsonbError> {
@@ -79,6 +207,7 @@ fn read_document<'de>(
     Ok((schema, value))
 }
 
+/// Writes a count in the selected framing; MultiChunk means one chunk count.
 pub(crate) fn write_length(
     writer: &mut impl Write,
     encoding: &Encoding,
@@ -90,6 +219,7 @@ pub(crate) fn write_length(
     }
 }
 
+/// Reads a single regular/long length; chunk termination needs Input::chunk.
 pub(crate) fn read_length<'de>(
     input: &mut impl Input<'de>,
     encoding: &Encoding,
@@ -101,6 +231,8 @@ pub(crate) fn read_length<'de>(
     }
 }
 
+/// Reads text or byte data, joining chunks only when framing requires it.
+/// `string` validates UTF-8, and `root` permits EOF between root-level chunks.
 pub(crate) fn read_blob<'de>(
     input: &mut impl Input<'de>,
     encoding: &Encoding,
@@ -122,6 +254,8 @@ pub(crate) fn read_blob<'de>(
             break;
         }
         let bytes = input.payload(length)?;
+        // Every text chunk must be valid UTF-8 on its own. A multibyte character
+        // cannot be split across chunks even if the joined bytes would be valid.
         if string {
             validate_utf8(&bytes, input.offset() - length)?;
         }
@@ -133,17 +267,21 @@ pub(crate) fn read_blob<'de>(
     Ok(Cow::Owned(output))
 }
 
+/// Reports invalid UTF-8 at the starting document offset of this payload.
 fn validate_utf8(bytes: &[u8], offset: u64) -> Result<(), AsonbError> {
     std::str::from_utf8(bytes)
         .map(|_| ())
         .map_err(|error| AsonbError::MessageWithOffset(error.to_string(), offset))
 }
 
+/// Accepts only whole-minute offsets within ASON's inclusive +/-23:59 range.
 pub(crate) fn is_valid_ason_utc_offset(offset: i32) -> bool {
     (-MAX_ASON_UTC_OFFSET_SECONDS..=MAX_ASON_UTC_OFFSET_SECONDS).contains(&offset)
         && offset % 60 == 0
 }
 
+/// Turns a variant shape into the type used by the shared payload machinery.
+/// The empty unit Tuple is internal: it is not a standalone document schema.
 pub(crate) fn payload_type(variant: &Variant) -> Type {
     match variant {
         Variant::Unit(_) => Type::Tuple(vec![]),
@@ -153,6 +291,8 @@ pub(crate) fn payload_type(variant: &Variant) -> Type {
     }
 }
 
+/// Checks a dynamic value against its resolved type while emitting its payload.
+/// Container headers may already be written when a later child fails validation.
 pub(crate) fn write_value(
     writer: &mut impl Write,
     schema: &DocumentSchema,
@@ -160,6 +300,7 @@ pub(crate) fn write_value(
     value: &Value<'_>,
 ) -> Result<(), AsonbError> {
     let ty = schema.resolve(ty.clone())?;
+    /// Shares exact-width integer writing without introducing numeric coercions.
     macro_rules! number {
         ($variant:ident,$value:expr) => {
             if let Value::$variant(value) = $value {
@@ -178,6 +319,8 @@ pub(crate) fn write_value(
         Type::U64 => number!(U64, value),
         Type::F32 => {
             if let Value::F32(value) = value {
+                // ASONB writers use a stable NaN representation, but retain
+                // ordinary values, infinities, and signed zero exactly.
                 let bits = if value.is_nan() {
                     0x7fc00000
                 } else {
@@ -224,6 +367,8 @@ pub(crate) fn write_value(
             if *encoding == Encoding::MultiChunk && bytes.is_empty() {
                 return write_u32(writer, 0);
             }
+            // A materialized blob is emitted as one chunk plus a terminator.
+            // Empty blobs need only the terminator, handled above.
             write_length(writer, encoding, bytes.len() as u64)?;
             write_all(writer, bytes)?;
             if *encoding == Encoding::MultiChunk {
@@ -300,6 +445,9 @@ pub(crate) fn write_value(
     Err(AsonbError::Message(format!("Value does not match {ty:?}.")))
 }
 
+/// Materializes a schema-directed value tree, borrowing leaf bytes when possible.
+/// Only the actual root may use EOF instead of a MultiChunk terminator; children
+/// always receive `false` so a truncated child cannot consume its parent's end.
 pub(crate) fn read_value<'de>(
     input: &mut impl Input<'de>,
     schema: &DocumentSchema,
@@ -357,6 +505,8 @@ pub(crate) fn read_value<'de>(
                 if encoding == Encoding::MultiChunk && count == 0 {
                     break;
                 }
+                // Check the combined count across chunks, not just each chunk.
+                // This is a platform-capacity check rather than a policy quota.
                 let total = (values.len() as u64)
                     .checked_add(count)
                     .ok_or_else(|| AsonbError::Message("Container length overflow.".into()))?;
@@ -505,6 +655,7 @@ fn value_count<T>(count: u64) -> Result<usize, AsonbError> {
     Ok(count)
 }
 
+/// Grows a materialized container fallibly before moving the next value into it.
 fn push_value<T>(values: &mut Vec<T>, value: T) -> Result<(), AsonbError> {
     values
         .try_reserve(1)
@@ -518,12 +669,14 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Allows large valid counts while rejecting impossible platform allocations.
     fn test_platform_container_capacity() {
         assert_eq!(value_count::<Value<'_>>(0).unwrap(), 0);
         assert!(value_count::<Value<'_>>(u64::MAX).is_err());
         assert!(value_count::<Value<'_>>(1_000_001).is_ok());
     }
 
+    /// Checks both ownership modes and truncations, except legal root chunk EOFs.
     fn round_trip(ty: Type, value: Value<'_>) {
         let schema = DocumentSchema::new(ty);
         let mut bytes = Vec::new();
@@ -544,6 +697,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers all framing modes and all four enumeration payload shapes.
     fn test_every_payload_form() {
         for encoding in [Encoding::Regular, Encoding::Long, Encoding::MultiChunk] {
             round_trip(
@@ -593,6 +747,7 @@ mod tests {
     }
 
     #[test]
+    /// Allows root EOF only at chunk boundaries and rejects invalid text chunks.
     fn test_chunk_boundaries_and_utf8() {
         let schema = DocumentSchema::new(Type::String(Encoding::MultiChunk));
         let mut bytes = Vec::new();
@@ -612,6 +767,7 @@ mod tests {
     }
 
     #[test]
+    /// Rejects non-scalar Unicode values and mismatched dynamic numeric widths.
     fn test_invalid_values() {
         let schema = DocumentSchema::new(Type::Char);
         let mut bytes = Vec::new();
@@ -633,6 +789,7 @@ mod tests {
     }
 
     #[test]
+    /// Distinguishes optional root terminators from mandatory nested terminators.
     fn test_nested_chunks_and_empty_values() {
         for (ty, value) in [
             (Type::String(Encoding::MultiChunk), Value::String("".into())),

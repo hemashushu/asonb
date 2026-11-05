@@ -18,52 +18,122 @@ use crate::{
     binary::{Input, write_all, write_u32},
 };
 
-/// Every type class defined by version 1 of ASONB.
+/// A value's wire type, independent of the Rust type used to read or write it.
+///
+/// Container children describe every possible element or variant, even when a
+/// particular value is empty. [`Type::Reference`] reuses a definition from the
+/// enclosing [`DocumentSchema`]; it does not represent a shared value or pointer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
+    /// A signed 8-bit integer.
     I8,
+    /// A signed 16-bit little-endian integer.
     I16,
+    /// A signed 32-bit little-endian integer.
     I32,
+    /// A signed 64-bit little-endian integer.
     I64,
+    /// An unsigned 8-bit integer.
     U8,
+    /// An unsigned 16-bit little-endian integer.
     U16,
+    /// An unsigned 32-bit little-endian integer.
     U32,
+    /// An unsigned 64-bit little-endian integer.
     U64,
+    /// An IEEE 754 single-precision value; writers normalize NaN payload bits.
     F32,
+    /// An IEEE 754 double-precision value; writers normalize NaN payload bits.
     F64,
+    /// A one-byte Boolean: writers use zero/one; readers treat nonzero as true.
     Bool,
+    /// A Unicode scalar value stored as a little-endian u32.
     Char,
+    /// Signed whole seconds since the Unix epoch, with no stored UTC offset.
     DateTime,
-    String(Encoding),
-    Bytes(Encoding),
-    List(Encoding, Box<Type>),
-    Map(
-        /* is_long_regular_map */ bool,
-        /* name type */ Box<Type>,
-        /* value type */ Box<Type>,
+    /// UTF-8 text with the selected length or chunk framing.
+    String(
+        /// How the UTF-8 bytes are framed.
+        Encoding,
     ),
-    Tuple(Vec<Type>),
-    Object(/* object name */ String, Vec<Field>),
-    Enum(/* enum name */ String, Vec<Variant>),
-    Reference(u32),
+    /// Raw bytes, distinct from a List of u8 values.
+    Bytes(
+        /// How the byte payload is framed.
+        Encoding,
+    ),
+    /// A homogeneous sequence, whose type is known even when it is empty.
+    List(
+        /// How element counts are framed.
+        Encoding,
+        /// The schema shared by all elements.
+        Box<Type>,
+    ),
+    /// A sequence of key/value pairs; keys and values each have one fixed type.
+    Map(
+        /// Whether the pair count uses u64 (`true`) instead of u32 (`false`).
+        bool,
+        /// The type of each key.
+        Box<Type>,
+        /// The type of each value.
+        Box<Type>,
+    ),
+    /// A nonempty sequence with a separate type for each position.
+    Tuple(
+        /// Element types, in payload order.
+        Vec<Type>,
+    ),
+    /// A named, nonempty set of fields; values follow schema order on the wire.
+    Object(
+        /// The descriptive object name.
+        String,
+        /// Field names and types, in payload order.
+        Vec<Field>,
+    ),
+    /// A named choice among unit, newtype, tuple, or struct variants.
+    Enum(
+        /// The ASON identifier naming this enumeration.
+        String,
+        /// All possible variants; their positions are their wire indices.
+        Vec<Variant>,
+    ),
+    /// A zero-based index into the enclosing document's reference table.
+    Reference(
+        /// The referenced definition's index, not a byte offset.
+        u32,
+    ),
 }
 
 /// Forms of Strings, Byte Data, and List.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Encoding {
+    /// One u32 length followed by the entire payload.
     Regular,
+    /// One u64 length followed by the entire payload.
     Long,
+    /// Repeated u32 chunk lengths and payloads, normally ended by a zero length.
+    /// At the document root, EOF between chunks can also end the value.
     MultiChunk,
 }
 
 /// Object field description.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Field {
+    /// The field's wire name, after any Serde rename has been applied.
     pub name: String,
+    /// The schema used to read or write the field's value.
     pub ty: Type,
 }
 
 impl Field {
+    /// Creates a field description without validating it yet.
+    ///
+    /// `name` becomes the owned wire name; `ty` describes the field's payload.
+    /// [`DocumentSchema::validate`] checks identifier syntax and duplicate names.
+    ///
+    /// ```
+    /// let field = asonb::Field::new("count", asonb::Type::U32);
+    /// assert_eq!(field.name, "count");
+    /// ```
     pub fn new(name: impl Into<String>, ty: Type) -> Self {
         Self {
             name: name.into(),
@@ -76,19 +146,45 @@ impl Field {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Variant {
     /// A variant with no payload.
-    Unit(String),
+    Unit(
+        /// The variant's wire name.
+        String,
+    ),
 
     /// A variant with a single payload.
-    Newtype(String, Type),
+    Newtype(
+        /// The variant's wire name.
+        String,
+        /// The single payload's type.
+        Type,
+    ),
 
     /// A variant with a tuple payload.
-    Tuple(String, Vec<Type>),
+    Tuple(
+        /// The variant's wire name.
+        String,
+        /// At least two payload types, in order.
+        Vec<Type>,
+    ),
 
     /// A variant with a struct payload.
-    Struct(String, Vec<Field>),
+    Struct(
+        /// The variant's wire name.
+        String,
+        /// A nonempty field list, in payload order.
+        Vec<Field>,
+    ),
 }
 
 impl Variant {
+    /// Borrows the wire name, regardless of the variant's payload shape.
+    ///
+    /// This does not resolve a reference or allocate a new string.
+    ///
+    /// ```
+    /// let variant = asonb::Variant::Newtype("Count".into(), asonb::Type::U32);
+    /// assert_eq!(variant.name(), "Count");
+    /// ```
     pub fn name(&self) -> &str {
         match self {
             Self::Unit(name)
@@ -110,6 +206,16 @@ pub struct DocumentSchema {
 }
 
 impl DocumentSchema {
+    /// Creates a schema with `root` as its value type and an empty reference table.
+    ///
+    /// No validation happens here. If `root` contains references, fill in
+    /// [`Self::references`] before validating or writing the document.
+    ///
+    /// ```
+    /// let schema = asonb::DocumentSchema::new(asonb::Type::I32);
+    /// schema.validate()?;
+    /// # Ok::<(), asonb::AsonbError>(())
+    /// ```
     pub fn new(root: Type) -> Self {
         Self {
             references: Vec::new(),
@@ -117,6 +223,18 @@ impl DocumentSchema {
         }
     }
 
+    /// Builds and validates the complete schema for Rust type `T`.
+    ///
+    /// No value is needed: element types and all enum variants come from
+    /// [`Schema`]. Repeated compound definitions share reference entries.
+    /// Recursive Rust types and invalid type descriptions return an error.
+    ///
+    /// ```
+    /// let schema = asonb::DocumentSchema::of::<Vec<i32>>()?;
+    /// assert_eq!(schema.root,
+    ///     asonb::Type::List(asonb::Encoding::Regular, Box::new(asonb::Type::I32)));
+    /// # Ok::<(), asonb::AsonbError>(())
+    /// ```
     pub fn of<T: Schema + ?Sized>() -> Result<Self, AsonbError> {
         let mut builder = SchemaBuilder::default();
         let root = builder.build::<T>()?;
@@ -128,8 +246,17 @@ impl DocumentSchema {
         Ok(schema)
     }
 
-    /// Validate every entry, including unused definitions. Completed references
-    /// are cached so shared schemas are checked only once.
+    /// Checks the root and every reference entry, including unused definitions.
+    ///
+    /// Rejects missing or cyclic references, invalid field/enum identifiers,
+    /// duplicate field/variant names, and invalid container arities. Successful
+    /// validation does not impose a resource quota or prove that a later value
+    /// matches the schema. There are no arguments; the schema is left unchanged.
+    ///
+    /// ```
+    /// let schema = asonb::DocumentSchema::new(asonb::Type::Reference(0));
+    /// assert!(schema.validate().is_err()); // The reference table is empty.
+    /// ```
     pub fn validate(&self) -> Result<(), AsonbError> {
         let mut active = vec![false; self.references.len()];
         let mut visited = vec![false; self.references.len()];
@@ -142,6 +269,7 @@ impl DocumentSchema {
         Ok(())
     }
 
+    /// Walks the type graph with separate "on this path" and "already done" marks.
     fn validate_type(
         &self,
         ty: &Type,
@@ -155,6 +283,8 @@ impl DocumentSchema {
                     .references
                     .get(index)
                     .ok_or_else(|| AsonbError::Message("Reference index out of range.".into()))?;
+                // Reusing a completed definition is fine. Reaching a definition
+                // still on this DFS path is a cycle, not harmless schema sharing.
                 if active[index] {
                     return Err(AsonbError::Message("Cyclic type reference.".into()));
                 }
@@ -224,6 +354,8 @@ impl DocumentSchema {
         Ok(())
     }
 
+    /// Follows reference aliases until a concrete type is found.
+    /// The bounded walk also protects callers from an unvalidated cyclic table.
     pub(crate) fn resolve(&self, mut ty: Type) -> Result<Type, AsonbError> {
         for _ in 0..=self.references.len() {
             match ty {
@@ -242,6 +374,8 @@ impl DocumentSchema {
         Err(AsonbError::Message("Cyclic type reference.".into()))
     }
 
+    /// Writes the reference table and root type, but not the document header.
+    /// Callers validate first so malformed schemas cannot emit partial documents.
     pub(crate) fn write(&self, writer: &mut impl Write) -> Result<(), AsonbError> {
         write_u32(writer, self.references.len() as u64)?;
         for ty in &self.references {
@@ -250,6 +384,7 @@ impl DocumentSchema {
         write_type(writer, &self.root)
     }
 
+    /// Reads the entire schema and validates even unreachable reference entries.
     pub(crate) fn read<'de>(input: &mut impl Input<'de>) -> Result<Self, AsonbError> {
         let count = input.u32()?;
         let mut references = Vec::new();
@@ -263,6 +398,7 @@ impl DocumentSchema {
     }
 }
 
+/// Requires a nonempty field list with valid, unique wire identifiers.
 fn validate_fields(fields: &[Field]) -> Result<(), AsonbError> {
     if fields.is_empty() {
         return Err(AsonbError::Message(
@@ -283,7 +419,9 @@ fn validate_fields(fields: &[Field]) -> Result<(), AsonbError> {
     Ok(())
 }
 
+/// Applies ASON's identifier ranges, which deliberately differ from Rust's.
 fn is_valid_ason_identifier(value: &str) -> bool {
+    /// Recognizes first characters; later characters may also be ASCII digits.
     fn is_start(character: char) -> bool {
         character.is_ascii_alphabetic()
             || character == '_'
@@ -298,11 +436,13 @@ fn is_valid_ason_identifier(value: &str) -> bool {
     is_start(first) && characters.all(|character| is_start(character) || character.is_ascii_digit())
 }
 
+/// Writes a UTF-8 byte length and name, without a trailing NUL byte.
 fn write_name(writer: &mut impl Write, name: &str) -> Result<(), AsonbError> {
     write_u32(writer, name.len() as u64)?;
     write_all(writer, name.as_bytes())
 }
 
+/// Reads an owned UTF-8 name and reports invalid text at its payload offset.
 fn read_name<'de>(input: &mut impl Input<'de>) -> Result<String, AsonbError> {
     let length = input.u32()?;
     let offset = input.offset();
@@ -311,6 +451,7 @@ fn read_name<'de>(input: &mut impl Input<'de>) -> Result<String, AsonbError> {
         .map_err(|error| AsonbError::MessageWithOffset(error.to_string(), offset))
 }
 
+/// Writes a field count followed by ordered name/type pairs.
 fn write_fields(writer: &mut impl Write, fields: &[Field]) -> Result<(), AsonbError> {
     write_u32(writer, fields.len() as u64)?;
     for field in fields {
@@ -320,6 +461,7 @@ fn write_fields(writer: &mut impl Write, fields: &[Field]) -> Result<(), AsonbEr
     Ok(())
 }
 
+/// Writes the count and ordered type descriptions for a tuple payload.
 fn write_types(writer: &mut impl Write, types: &[Type]) -> Result<(), AsonbError> {
     write_u32(writer, types.len() as u64)?;
     for ty in types {
@@ -328,6 +470,7 @@ fn write_types(writer: &mut impl Write, types: &[Type]) -> Result<(), AsonbError
     Ok(())
 }
 
+/// Emits a type-class tag, then only the metadata that this class requires.
 fn write_type(writer: &mut impl Write, ty: &Type) -> Result<(), AsonbError> {
     let tag = match ty {
         Type::I8 => 0x13,
@@ -349,6 +492,8 @@ fn write_type(writer: &mut impl Write, ty: &Type) -> Result<(), AsonbError> {
                 Type::Bytes(_) => 0x60,
                 _ => 0x70,
             };
+            // The high nibble selects the container family; the low nibble
+            // selects framing. Long form is 8, not the next sequential value.
             base + match encoding {
                 Encoding::Regular => 0,
                 Encoding::MultiChunk => 1,
@@ -409,6 +554,7 @@ fn write_type(writer: &mut impl Write, ty: &Type) -> Result<(), AsonbError> {
     Ok(())
 }
 
+/// Reads a counted list of type descriptions without guessing from value bytes.
 fn read_types<'de>(input: &mut impl Input<'de>) -> Result<Vec<Type>, AsonbError> {
     let count = input.u32()?;
     let mut types = Vec::new();
@@ -418,6 +564,7 @@ fn read_types<'de>(input: &mut impl Input<'de>) -> Result<Vec<Type>, AsonbError>
     Ok(types)
 }
 
+/// Reads ordered name/type pairs; semantic checks happen after schema parsing.
 fn read_fields<'de>(input: &mut impl Input<'de>) -> Result<Vec<Field>, AsonbError> {
     let count = input.u32()?;
     let mut fields = Vec::new();
@@ -427,6 +574,7 @@ fn read_fields<'de>(input: &mut impl Input<'de>) -> Result<Vec<Field>, AsonbErro
     Ok(fields)
 }
 
+/// Parses one recursive type description and rejects unsupported type-class tags.
 fn read_type<'de>(input: &mut impl Input<'de>) -> Result<Type, AsonbError> {
     let offset = input.offset();
     let tag = input.exact::<1>()?[0];
@@ -498,19 +646,59 @@ fn read_type<'de>(input: &mut impl Input<'de>) -> Result<Type, AsonbError> {
 }
 
 /// Supplies a static schema without inspecting a serialized value.
+///
+/// Usually implemented with `#[derive(asonb::Schema)]` alongside Serde derives.
+/// Implementations must describe the actual Serde representation, not merely
+/// the fields' Rust types. Use the supplied builder for child types so reference
+/// reuse and recursive-type detection remain effective.
 pub trait Schema {
+    /// Describes this type using `builder` to obtain any child schemas.
+    ///
+    /// Return an error if the representation cannot be described by ASONB.
+    /// Call [`SchemaBuilder::build`] rather than this method directly when
+    /// assembling a document: `build` adds caching and recursion checks.
+    ///
+    /// ```
+    /// struct UserId(u64);
+    /// impl asonb::Schema for UserId {
+    ///     fn schema(builder: &mut asonb::SchemaBuilder)
+    ///         -> Result<asonb::Type, asonb::AsonbError>
+    ///     {
+    ///         builder.build::<u64>()
+    ///     }
+    /// }
+    /// let schema = asonb::DocumentSchema::of::<UserId>()?;
+    /// assert_eq!(schema.root, asonb::Type::U64);
+    /// # Ok::<(), asonb::AsonbError>(())
+    /// ```
     fn schema(builder: &mut SchemaBuilder) -> Result<Type, AsonbError>;
 }
 
 /// Builds deterministic reusable type definitions and rejects Rust recursion.
 #[derive(Default)]
 pub struct SchemaBuilder {
+    /// Compound definitions in first-completed order, used by Reference indices.
     references: Vec<Type>,
+    /// Rust type names currently being expanded, used to reject recursive types.
     active: Vec<&'static str>,
+    /// Completed Rust types and their reusable schema or reference.
     cache: HashMap<&'static str, Type>,
 }
 
 impl SchemaBuilder {
+    /// Builds the schema of `T`, reusing an earlier result when possible.
+    ///
+    /// `T` is selected through the type parameter; no runtime value is passed.
+    /// Compound types are placed in this builder's private reference table, so
+    /// a returned [`Type::Reference`] is meaningful only with that table. Use
+    /// [`DocumentSchema::of`] when you need a standalone, complete schema.
+    /// Recursion and errors from `T`'s [`Schema`] implementation are returned.
+    ///
+    /// ```
+    /// let mut builder = asonb::SchemaBuilder::default();
+    /// assert_eq!(builder.build::<i32>()?, asonb::Type::I32);
+    /// # Ok::<(), asonb::AsonbError>(())
+    /// ```
     pub fn build<T: Schema + ?Sized>(&mut self) -> Result<Type, AsonbError> {
         let name = std::any::type_name::<T>();
         if let Some(ty) = self.cache.get(name) {
@@ -521,8 +709,11 @@ impl SchemaBuilder {
         }
         self.active.push(name);
         let result = T::schema(self);
+        // Always remove the active mark, including when a custom schema fails.
         self.active.pop();
         let mut ty = result?;
+        // Cache by Rust identity for speed, then deduplicate compound definitions
+        // by structure so distinct Rust types can still share wire metadata.
         if matches!(ty, Type::Object(..) | Type::Tuple(..) | Type::Enum(..)) {
             let index = if let Some(index) = self.references.iter().position(|entry| entry == &ty) {
                 index
@@ -540,27 +731,35 @@ impl SchemaBuilder {
     }
 }
 
+/// Implements scalar mappings without allocating reference-table entries.
 macro_rules! primitive_schema {
-    ($($rust:ty => $ty:expr),* $(,)?)=>{$(impl Schema for $rust {fn schema(_: &mut SchemaBuilder)->Result<Type,AsonbError>{Ok($ty)}})*};
+    ($($rust:ty => $ty:expr),* $(,)?)=>{$(impl Schema for $rust {
+        /// Returns this Rust type's fixed wire representation.
+        fn schema(_: &mut SchemaBuilder)->Result<Type,AsonbError>{Ok($ty)}
+    })*};
 }
 primitive_schema!(i8=>Type::I8,i16=>Type::I16,i32=>Type::I32,i64=>Type::I64,isize=>Type::I64,u8=>Type::U8,u16=>Type::U16,u32=>Type::U32,u64=>Type::U64,usize=>Type::U64,f32=>Type::F32,f64=>Type::F64,bool=>Type::Bool,char=>Type::Char,str=>Type::String(Encoding::Regular),String=>Type::String(Encoding::Regular),()=>Type::Tuple(vec![]));
 impl<T: Schema + ToOwned + ?Sized> Schema for std::borrow::Cow<'_, T> {
+    /// Ownership does not change the borrowed type's wire representation.
     fn schema(builder: &mut SchemaBuilder) -> Result<Type, AsonbError> {
         builder.build::<T>()
     }
 }
 primitive_schema!(serde_bytes::Bytes=>Type::Bytes(Encoding::Regular),serde_bytes::ByteBuf=>Type::Bytes(Encoding::Regular));
 impl<T: Schema + ?Sized> Schema for &T {
+    /// References are transparent values, not pointer-identity records.
     fn schema(builder: &mut SchemaBuilder) -> Result<Type, AsonbError> {
         builder.build::<T>()
     }
 }
 impl<T: Schema + ?Sized> Schema for Box<T> {
+    /// Heap allocation does not add a wire-level wrapper.
     fn schema(builder: &mut SchemaBuilder) -> Result<Type, AsonbError> {
         builder.build::<T>()
     }
 }
 impl<T: Schema> Schema for [T] {
+    /// Describes homogeneous elements even when a particular slice is empty.
     fn schema(builder: &mut SchemaBuilder) -> Result<Type, AsonbError> {
         Ok(Type::List(
             Encoding::Regular,
@@ -569,16 +768,19 @@ impl<T: Schema> Schema for [T] {
     }
 }
 impl<T: Schema> Schema for Vec<T> {
+    /// Uses the same homogeneous List mapping as a slice.
     fn schema(builder: &mut SchemaBuilder) -> Result<Type, AsonbError> {
         <[T]>::schema(builder)
     }
 }
 impl<T: Schema, const SIZE: usize> Schema for [T; SIZE] {
+    /// Matches Serde's default tuple mapping; use the array adapter for a List.
     fn schema(builder: &mut SchemaBuilder) -> Result<Type, AsonbError> {
         Ok(Type::Tuple(vec![builder.build::<T>()?; SIZE]))
     }
 }
 impl<T: Schema> Schema for Option<T> {
+    /// Describes both None and Some, regardless of the current value.
     fn schema(builder: &mut SchemaBuilder) -> Result<Type, AsonbError> {
         Ok(Type::Enum(
             "Option".into(),
@@ -590,6 +792,7 @@ impl<T: Schema> Schema for Option<T> {
     }
 }
 impl<T: Schema, E: Schema> Schema for Result<T, E> {
+    /// Describes both result branches, each with a single typed payload.
     fn schema(builder: &mut SchemaBuilder) -> Result<Type, AsonbError> {
         Ok(Type::Enum(
             "Result".into(),
@@ -601,6 +804,7 @@ impl<T: Schema, E: Schema> Schema for Result<T, E> {
     }
 }
 impl<K: Schema + Eq + Hash, V: Schema, S: std::hash::BuildHasher> Schema for HashMap<K, V, S> {
+    /// Records key and value types, not hash iteration order or hasher state.
     fn schema(builder: &mut SchemaBuilder) -> Result<Type, AsonbError> {
         Ok(Type::Map(
             false,
@@ -610,6 +814,7 @@ impl<K: Schema + Eq + Hash, V: Schema, S: std::hash::BuildHasher> Schema for Has
     }
 }
 impl<K: Schema + Ord, V: Schema> Schema for BTreeMap<K, V> {
+    /// Uses regular Map framing; ordering comes from the serialized value.
     fn schema(builder: &mut SchemaBuilder) -> Result<Type, AsonbError> {
         Ok(Type::Map(
             false,
@@ -618,8 +823,12 @@ impl<K: Schema + Ord, V: Schema> Schema for BTreeMap<K, V> {
         ))
     }
 }
+/// Generates positional tuple schemas for the supported Rust tuple arities.
 macro_rules! tuple_schema {
-    ($($name:ident),+)=>{impl<$($name:Schema),+> Schema for ($($name,)+){fn schema(builder:&mut SchemaBuilder)->Result<Type,AsonbError>{Ok(Type::Tuple(vec![$(builder.build::<$name>()?),+]))}}};
+    ($($name:ident),+)=>{impl<$($name:Schema),+> Schema for ($($name,)+){
+        /// Builds each position independently, preserving Rust tuple order.
+        fn schema(builder:&mut SchemaBuilder)->Result<Type,AsonbError>{Ok(Type::Tuple(vec![$(builder.build::<$name>()?),+]))}
+    }};
 }
 tuple_schema!(A);
 tuple_schema!(A, B);
@@ -644,6 +853,7 @@ mod tests {
     use crate::binary::SliceInput;
 
     #[test]
+    /// Round-trips every supported type description and rejects all truncations.
     fn test_all_type_definitions() {
         let mut types = vec![
             Type::I8,
@@ -692,6 +902,7 @@ mod tests {
     }
 
     #[test]
+    /// Keeps reserved container-framing tags from being accepted accidentally.
     fn test_unsupported_type_classes_are_rejected() {
         for tag in [0x52, 0x59, 0x62, 0x69, 0x72, 0x79] {
             assert!(
@@ -702,6 +913,7 @@ mod tests {
     }
 
     #[test]
+    /// Locks down the exact MultiChunk type tags for text, byte data, and Lists.
     fn test_multi_chunk_type_classes() {
         for (ty, expected_tag) in [
             (Type::String(Encoding::MultiChunk), 0x51),
@@ -720,6 +932,7 @@ mod tests {
     }
 
     #[test]
+    /// Requires every I/O entry point to reject invalid arities before payloads.
     fn test_container_arity_validation() {
         for ty in [
             Type::Tuple(vec![]),
@@ -769,6 +982,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks forward aliases, invalid indices, cycles, and duplicate wire names.
     fn test_reference_and_name_validation() {
         let valid = DocumentSchema {
             references: vec![Type::Reference(1), Type::I32],
@@ -823,6 +1037,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers ASON's Unicode ranges and disallowed identifier punctuation.
     fn test_ason_identifier_validation() {
         for name in ["_field2", "field_2", "文🙂"] {
             DocumentSchema::new(Type::Object("".into(), vec![Field::new(name, Type::I8)]))
@@ -860,7 +1075,9 @@ mod tests {
     }
 
     #[test]
+    /// Rejects cycles even in unused entries while allowing completed sharing.
     fn test_cyclic_document_rejected_at_io_boundaries() {
+        /// Requires the same cycle diagnostic through each reading/writing API.
         fn assert_cycle(error: AsonbError) {
             assert!(
                 matches!(error, AsonbError::Message(message) if message == "Cyclic type reference.")
@@ -915,6 +1132,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks reusable compound definitions and the absence of an arity quota.
     fn test_static_schemas() {
         let schema = DocumentSchema::of::<Vec<Option<(i32, String)>>>().unwrap();
         assert_eq!(schema.references.len(), 2);

@@ -5,22 +5,38 @@
 // For more details, see the LICENSE, LICENSE.additional, and CONTRIBUTING files.
 
 //! Generate value-independent schemas using Serde's serialization names.
+//!
+//! The expansion records every possible field and variant before seeing a
+//! value. Value-dependent Serde layouts are rejected rather than inferred from
+//! whichever instance happens to be serialized first. Use the derive re-export
+//! in `asonb`; this crate contains only the compiler-facing implementation.
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Attribute, Data, DeriveInput, Fields, LitStr, parse_macro_input, parse_quote};
 
 #[derive(Default)]
+/// Serialization-side metadata collected from one container, variant, or field.
 struct Attributes {
+    /// Explicit serialize name, taking precedence over a casing rule.
     name: Option<String>,
+    /// rename_all rule for the container's fields or enumeration's variants.
     rule: Option<String>,
+    /// An enum-level rename_all_fields rule for named variant payloads.
     field_rule: Option<String>,
+    /// Whether this item is omitted from serialization and therefore its schema.
     skip: bool,
+    /// Serde with/serialize_with path, recognized or requiring an override.
     adapter: Option<String>,
+    /// User function that builds the actual wire schema for custom serialization.
     override_path: Option<syn::Path>,
+    /// Whether a named wrapper uses its sole serialized field's representation.
     transparent: bool,
 }
 
+/// Reads supported metadata while consuming unrelated Serde options safely.
+/// Only serialization names matter: deserialize-only settings do not describe
+/// bytes produced by this writer. Layouts that vary by value are rejected here.
 fn attributes(attrs: &[Attribute]) -> syn::Result<Attributes> {
     let mut output = Attributes::default();
     for attr in attrs {
@@ -54,6 +70,8 @@ fn attributes(attrs: &[Attribute]) -> syn::Result<Attributes> {
                 if meta.input.peek(syn::Token![=]) {
                     name = Some(meta.value()?.parse::<LitStr>()?.value());
                 } else {
+                    // Serde allows separate serialize and deserialize names.
+                    // Consume both, but retain only the outgoing wire name.
                     meta.parse_nested_meta(|nested| {
                         let value = nested.value()?.parse::<LitStr>()?.value();
                         if nested.path.is_ident("serialize") {
@@ -91,6 +109,9 @@ fn attributes(attrs: &[Attribute]) -> syn::Result<Attributes> {
     Ok(output)
 }
 
+/// Matches Serde's casing rules, including its different field/variant rules.
+/// This deliberately does not use a general word-splitting library: Serde turns
+/// HTTPServer into h_t_t_p_server, not the more usual http_server.
 fn renamed(name: &str, rule: Option<&str>, variant: bool) -> syn::Result<String> {
     let snake = || {
         let mut output = String::new();
@@ -183,6 +204,9 @@ fn renamed(name: &str, rule: Option<&str>, variant: bool) -> syn::Result<String>
     })
 }
 
+/// Generates an expression for a field's wire type, honoring explicit overrides.
+/// Known adapters bypass the Rust field type because their Serde representation
+/// is intentionally different (for example chrono text versus binary DateTime).
 fn field_type(
     field: &syn::Field,
     attrs: &Attributes,
@@ -218,6 +242,8 @@ fn field_type(
     Ok(quote!(builder.build::<#ty>()?))
 }
 
+/// Generates ordered child expressions, dropping skipped fields before counting.
+/// Named fields become Field descriptions; unnamed positions remain bare Types.
 fn fields(
     fields: &Fields,
     rule: Option<&str>,
@@ -231,6 +257,7 @@ fn fields(
         }
         let ty = field_type(field, &attrs, root)?;
         if let Some(ident) = &field.ident {
+            // A raw Rust identifier such as r#type is just "type" on the wire.
             let name = attrs.name.unwrap_or(renamed(
                 ident.to_string().trim_start_matches("r#"),
                 rule,
@@ -244,7 +271,12 @@ fn fields(
     Ok(output)
 }
 
+/// Builds the Schema impl while preserving lifetimes, const generics, and bounds.
+/// Generated child calls go through SchemaBuilder so reuse and recursion checks
+/// work the same way for handwritten and derived implementations.
 fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    // A dependency may be renamed in Cargo.toml. Resolve its actual Rust path
+    // instead of assuming every downstream crate imports it as `asonb`.
     let root = match proc_macro_crate::crate_name("asonb") {
         Ok(proc_macro_crate::FoundCrate::Itself) => quote!(::asonb),
         Ok(proc_macro_crate::FoundCrate::Name(name)) => {
@@ -270,6 +302,8 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
             let parts = fields(&data.fields, attrs.rule.as_deref(), &root)?;
             if attrs.transparent {
+                // Serde removes the wrapper entirely. Exactly one serialized
+                // field must survive; skipped fields do not affect that shape.
                 let active = data
                     .fields
                     .iter()
@@ -343,6 +377,9 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             ));
         }
     };
+    // A direct child/override expression already returns Result and ends in ?.
+    // Remove that outer ? rather than wrapping it as Ok(call()?), while ordinary
+    // Type constructors need Ok(...). Parsing avoids fragile token-string edits.
     let result = match syn::parse2::<syn::Expr>(body)? {
         syn::Expr::Try(expression) => {
             let expression = expression.expr;
@@ -352,11 +389,33 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     };
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     Ok(
-        quote!(impl #impl_generics #root::Schema for #ident #ty_generics #where_clause {fn schema(builder:&mut #root::SchemaBuilder)->Result<#root::Type,#root::AsonbError>{#result}}),
+        quote!(impl #impl_generics #root::Schema for #ident #ty_generics #where_clause {
+            /// Builds this type's serialization schema without inspecting a value.
+            fn schema(builder:&mut #root::SchemaBuilder)->Result<#root::Type,#root::AsonbError>{#result}
+        }),
     )
 }
 
 #[proc_macro_derive(Schema, attributes(serde, asonb))]
+/// Implements the main crate's Schema trait for a struct or enumeration.
+///
+/// `input` is the compiler-supplied token stream for the annotated item, not a
+/// runtime value. The returned tokens contain either an implementation or a
+/// span-aware compile error. Users invoke the derive, not this function directly.
+/// The generated schema follows Serde's serialized names, skips, and recognized
+/// adapters. Custom serialization needs `#[asonb(schema_with = "path")]`.
+///
+/// In a crate depending on `asonb`, use the re-exported derive as follows
+/// (this usage is also exercised by the main crate's documentation tests):
+///
+/// ```text
+/// #[derive(serde::Serialize, serde::Deserialize, asonb::Schema)]
+/// struct Reading {
+///     sensor_id: u32,
+///     temperature: f64,
+/// }
+/// let bytes = asonb::ser_to_bytes(&Reading { sensor_id: 7, temperature: 21.5 })?;
+/// ```
 pub fn derive_schema(input: TokenStream) -> TokenStream {
     expand(parse_macro_input!(input as DeriveInput))
         .unwrap_or_else(syn::Error::into_compile_error)
@@ -367,6 +426,7 @@ pub fn derive_schema(input: TokenStream) -> TokenStream {
 mod tests {
     use super::*;
     #[test]
+    /// Checks Serde-compatible casing and rejection of value-dependent fields.
     fn test_attributes_and_names() {
         assert_eq!(
             renamed("my_field", Some("camelCase"), false).unwrap(),

@@ -1,5 +1,5 @@
 error: this Serde representation has no fixed ASONB schema
- --> tests/ui/flatten_schema.rs:9:13
-  |
-9 |     #[serde(flatten)]
-  |             ^^^^^^^
+  --> tests/ui/flatten_schema.rs:12:13
+   |
+12 |     #[serde(flatten)]
+   |             ^^^^^^^

@@ -1,41 +1,41 @@
 error: unit, newtype, and tuple structs are unsupported by ASONB
- --> tests/ui/unsupported_forms.rs:4:8
+ --> tests/ui/unsupported_forms.rs:7:8
   |
-4 | struct Unit;
+7 | struct Unit;
   |        ^^^^
 
 error: unit, newtype, and tuple structs are unsupported by ASONB
- --> tests/ui/unsupported_forms.rs:7:8
-  |
-7 | struct Width(u32);
-  |        ^^^^^
+  --> tests/ui/unsupported_forms.rs:11:8
+   |
+11 | struct Width(
+   |        ^^^^^
 
 error: unit, newtype, and tuple structs are unsupported by ASONB
-  --> tests/ui/unsupported_forms.rs:10:8
+  --> tests/ui/unsupported_forms.rs:18:8
    |
-10 | struct RGB(u8, u8, u8);
+18 | struct RGB(
    |        ^^^
 
 error: unit, newtype, and tuple structs are unsupported by ASONB
-  --> tests/ui/unsupported_forms.rs:13:8
+  --> tests/ui/unsupported_forms.rs:29:8
    |
-13 | struct EmptyTuple();
+29 | struct EmptyTuple();
    |        ^^^^^^^^^^
 
 error: unit, newtype, and tuple structs are unsupported by ASONB
-  --> tests/ui/unsupported_forms.rs:17:8
+  --> tests/ui/unsupported_forms.rs:34:8
    |
-17 | struct Transparent(u32);
+34 | struct Transparent(
    |        ^^^^^^^^^^^
 
 error: tuple-like variants require at least two serialized elements
-  --> tests/ui/unsupported_forms.rs:21:5
+  --> tests/ui/unsupported_forms.rs:43:5
    |
-21 |     Empty(),
+43 |     Empty(),
    |     ^^^^^
 
 error: tuple-like variants require at least two serialized elements
-  --> tests/ui/unsupported_forms.rs:26:5
+  --> tests/ui/unsupported_forms.rs:50:5
    |
-26 |     One(u32, #[serde(skip)] u32),
+50 |     One(
    |     ^^^

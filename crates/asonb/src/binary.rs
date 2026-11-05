@@ -13,14 +13,19 @@ use std::{
 
 use crate::AsonbError;
 
+/// Signature, feature flags (currently zero), and format version (currently one).
 pub(crate) const HEADER: [u8; 8] = [0, b'A', b'S', b'O', b'N', b'B', 0, 1];
 
+/// Writes every byte and translates the destination's error into a library error.
+/// Writers do not track offsets, so write failures have no byte position.
 pub(crate) fn write_all(writer: &mut impl Write, bytes: &[u8]) -> Result<(), AsonbError> {
     writer
         .write_all(bytes)
         .map_err(|error| AsonbError::Message(error.to_string()))
 }
 
+/// Checks a wide count before writing a little-endian regular-length prefix.
+/// This prevents truncation when callers obtain lengths from usize or u64.
 pub(crate) fn write_u32(writer: &mut impl Write, value: u64) -> Result<(), AsonbError> {
     let value =
         u32::try_from(value).map_err(|_| AsonbError::Message("Length exceeds u32.".into()))?;
@@ -30,10 +35,14 @@ pub(crate) fn write_u32(writer: &mut impl Write, value: u64) -> Result<(), Asonb
 /// Payloads borrow only from a slice source. A general Read source cannot
 /// lend bytes with the lifetime of the document.
 pub(crate) trait Input<'de> {
+    /// Returns the number of bytes consumed since the document began.
     fn offset(&self) -> u64;
+    /// Reads one byte, returning None only for clean EOF before that byte.
     fn byte(&mut self) -> Result<Option<u8>, AsonbError>;
+    /// Reads exactly `length` bytes, borrowing when the source permits it.
     fn payload(&mut self, length: u64) -> Result<Cow<'de, [u8]>, AsonbError>;
 
+    /// Reads a fixed-width value, treating every missing byte as truncation.
     fn exact<const SIZE: usize>(&mut self) -> Result<[u8; SIZE], AsonbError> {
         let mut bytes = [0; SIZE];
         for byte in &mut bytes {
@@ -44,14 +53,18 @@ pub(crate) trait Input<'de> {
         Ok(bytes)
     }
 
+    /// Reads a little-endian 32-bit count or index.
     fn u32(&mut self) -> Result<u32, AsonbError> {
         Ok(u32::from_le_bytes(self.exact()?))
     }
+    /// Reads a little-endian 64-bit long-form count.
     fn u64(&mut self) -> Result<u64, AsonbError> {
         Ok(u64::from_le_bytes(self.exact()?))
     }
 
-    /// EOF is accepted before the first byte, never inside the prefix.
+    /// Reads a chunk count; `root` permits EOF to stand in for a zero terminator.
+    /// EOF is accepted before the first byte, never inside the prefix. Nested
+    /// values need an explicit zero so their end is not confused with truncation.
     fn chunk(&mut self, root: bool) -> Result<u32, AsonbError> {
         match self.byte()? {
             None if root => Ok(0),
@@ -63,6 +76,7 @@ pub(crate) trait Input<'de> {
         }
     }
 
+    /// Checks the signature, flags, and version with byte-specific diagnostics.
     fn header(&mut self) -> Result<(), AsonbError> {
         for (index, expected) in HEADER.iter().enumerate() {
             let offset = self.offset();
@@ -92,6 +106,8 @@ pub(crate) trait Input<'de> {
         Ok(())
     }
 
+    /// Requires EOF immediately after a complete root value.
+    /// This probes the source and may block if a live stream has not closed.
     fn finish(&mut self) -> Result<(), AsonbError> {
         let offset = self.offset();
         if self.byte()?.is_some() {
@@ -104,12 +120,16 @@ pub(crate) trait Input<'de> {
     }
 }
 
+/// A cursor over immutable document bytes; payloads can keep the input lifetime.
 pub(crate) struct SliceInput<'de> {
+    /// The unconsumed suffix of the caller's original slice.
     pub remaining: &'de [u8],
+    /// Bytes consumed so far, used for position-aware errors.
     offset: u64,
 }
 
 impl<'de> SliceInput<'de> {
+    /// Starts at byte zero of `bytes` without copying or allocating.
     pub fn new(bytes: &'de [u8]) -> Self {
         Self {
             remaining: bytes,
@@ -119,9 +139,11 @@ impl<'de> SliceInput<'de> {
 }
 
 impl<'de> Input<'de> for SliceInput<'de> {
+    /// Reports the cursor's absolute document position.
     fn offset(&self) -> u64 {
         self.offset
     }
+    /// Advances one byte, leaving an exhausted slice at EOF.
     fn byte(&mut self) -> Result<Option<u8>, AsonbError> {
         match self.remaining.split_first() {
             Some((&byte, tail)) => {
@@ -132,6 +154,7 @@ impl<'de> Input<'de> for SliceInput<'de> {
             None => Ok(None),
         }
     }
+    /// Splits off a checked subslice rather than allocating an owned payload.
     fn payload(&mut self, length: u64) -> Result<Cow<'de, [u8]>, AsonbError> {
         let size = payload_size(length)?;
         if size > self.remaining.len() {
@@ -146,21 +169,27 @@ impl<'de> Input<'de> for SliceInput<'de> {
     }
 }
 
+/// A position-tracking reader that never lends its temporary read buffers.
 pub(crate) struct ReaderInput<R> {
+    /// The underlying source, kept available for streaming-reader recovery.
     pub reader: R,
+    /// Successfully consumed bytes, excluding failed or interrupted reads.
     offset: u64,
 }
 
 impl<R> ReaderInput<R> {
+    /// Wraps `reader` at document offset zero without reading ahead.
     pub fn new(reader: R) -> Self {
         Self { reader, offset: 0 }
     }
 }
 
 impl<'de, R: Read> Input<'de> for ReaderInput<R> {
+    /// Reports the number of bytes actually delivered by the source.
     fn offset(&self) -> u64 {
         self.offset
     }
+    /// Reads one byte, retrying interruptions without changing the offset.
     fn byte(&mut self) -> Result<Option<u8>, AsonbError> {
         let mut byte = [0];
         loop {
@@ -180,6 +209,7 @@ impl<'de, R: Read> Input<'de> for ReaderInput<R> {
             }
         }
     }
+    /// Fills a stack buffer across short reads, keeping partial-read offsets.
     fn exact<const SIZE: usize>(&mut self) -> Result<[u8; SIZE], AsonbError> {
         let mut bytes = [0; SIZE];
         let mut filled = 0;
@@ -201,9 +231,12 @@ impl<'de, R: Read> Input<'de> for ReaderInput<R> {
         }
         Ok(bytes)
     }
+    /// Allocates once for a known length, then fills it across short reads.
     fn payload(&mut self, length: u64) -> Result<Cow<'de, [u8]>, AsonbError> {
         let size = payload_size(length)?;
         let mut bytes = Vec::new();
+        // Reserve explicitly so capacity/allocation errors become ordinary
+        // errors before resize initializes the already-reserved memory.
         bytes
             .try_reserve_exact(size)
             .map_err(|error| AsonbError::Message(error.to_string()))?;
@@ -238,9 +271,11 @@ pub(crate) fn payload_size(length: u64) -> Result<usize, AsonbError> {
 /// Fallible storage for an unknown-length value container. There is no
 /// artificial capacity quota; Vec still checks platform capacity and allocation.
 pub(crate) struct ValueBuffer {
+    /// Encoded payload held until an unknown-length container's count is known.
     pub bytes: Vec<u8>,
 }
 impl Write for ValueBuffer {
+    /// Appends a complete write, reporting allocation failure as an I/O error.
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.bytes
             .try_reserve(bytes.len())
@@ -248,6 +283,7 @@ impl Write for ValueBuffer {
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }
+    /// Does nothing: this buffer has no external sink to flush.
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
@@ -258,6 +294,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Checks every truncated header and each byte's signature/version diagnostic.
     fn test_header_and_truncation() {
         for end in 0..HEADER.len() {
             let message = if end == 0 {
@@ -282,6 +319,7 @@ mod tests {
         }
     }
 
+    /// Requires identical positioned errors through all public reading paths.
     fn assert_header_error(bytes: &[u8], message: &str, offset: u64) {
         let expected = AsonbError::MessageWithOffset(message.into(), offset);
         assert_eq!(SliceInput::new(bytes).header().unwrap_err(), expected);
@@ -299,6 +337,7 @@ mod tests {
     }
 
     #[test]
+    /// Distinguishes other formats from a merely incomplete ASONB document.
     fn test_non_asonb_header() {
         for bytes in [b"x".as_slice(), b"{\"name\": \"foo\"}", b"\x00JSON"] {
             assert_header_error(
@@ -310,6 +349,7 @@ mod tests {
     }
 
     #[test]
+    /// Exercises root-only EOF termination, partial counts, and u32 overflow.
     fn test_prefix_boundaries() {
         assert_eq!(SliceInput::new(&[]).chunk(true).unwrap(), 0);
         assert!(SliceInput::new(&[]).chunk(false).is_err());
@@ -323,6 +363,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that slices lend bytes and readers own bytes, with equal EOF checks.
     fn test_owned_and_borrowed_payloads() {
         let bytes = [1, 2, 3];
         let mut input = SliceInput::new(&bytes);
