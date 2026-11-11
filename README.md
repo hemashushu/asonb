@@ -70,7 +70,7 @@ The APIs use [Serde](https://github.com/serde-rs/serde) (the serialization frame
 
 ```toml
 [dependencies]
-asonb = "3.5.0" # Minor version and patch number may be varied
+asonb = "3.5.0" # Use the latest version of the ASONB crate
 serde = { version = "1", features = ["derive"] }
 ```
 
