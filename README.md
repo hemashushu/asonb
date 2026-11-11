@@ -70,7 +70,7 @@ The APIs use [Serde](https://github.com/serde-rs/serde) (the serialization frame
 
 ```toml
 [dependencies]
-asonb = "3"
+asonb = "3.5.0" # Minor version and patch number may be varied
 serde = { version = "1", features = ["derive"] }
 ```
 
@@ -141,7 +141,7 @@ assert_eq!(text, "Hello");
 
 For pipelines, sockets, and incremental producers, the streaming APIs process a list one or more elements at a time without materializing the entire document.
 
-The streaming APIs accept documents whose root value is a multi-chunk `List`.
+The streaming APIs accept documents whose root value is a multi-chunk `List`, or a Rust `Result` whose `Ok` payload is a multi-chunk List. Result streams use the existing Enumeration and List encodings without changing the ASONB format.
 
 The serializer opens a list, writes elements as they become available, and finishes with an explicit end marker:
 
@@ -257,6 +257,47 @@ cd target/debug/examples
 ```
 
 The stream reader returns an error once and then stops. The writer rejects writes before `start_list()` or after `end_list()` or a failed write. Dropping the writer does not add an end marker. Unlike the single-document reader, the stream reader does not probe beyond an explicit end marker, so it can be used on a live socket.
+
+For `Result<Vec<T>, E>`, use `result_stream_writer::<T, E, _>` and `result_stream_reader::<T, E, _>`. `T` is the List element type and `E` is the business error type; they need not be the same:
+
+```rust
+fn main() -> Result<(), asonb::AsonbError> {
+    let mut bytes = Vec::new();
+    let mut stream = asonb::result_stream_writer::<i32, String, _>(&mut bytes).start_ok()?;
+    stream.write(&11)?;
+    stream.writes(&[13, 17])?;
+    stream.end_list()?;
+
+    match asonb::result_stream_reader::<i32, String, _>(bytes.as_slice())? {
+        asonb::ResultStreamReader::Ok(stream) => {
+            let values = stream.collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(values, vec![11, 13, 17]);
+        }
+        asonb::ResultStreamReader::Err(error) => panic!("{error}"),
+    }
+    assert_eq!(
+        asonb::de_from_slice::<Result<Vec<i32>, String>>(&bytes)?,
+        Ok(vec![11, 13, 17])
+    );
+
+    let mut bytes = Vec::new();
+    asonb::result_stream_writer::<i32, String, _>(&mut bytes)
+        .write_err(&"failed".to_owned())?;
+    assert!(matches!(
+        asonb::result_stream_reader::<i32, String, _>(bytes.as_slice())?,
+        asonb::ResultStreamReader::Err(error) if error == "failed"
+    ));
+    Ok(())
+}
+```
+
+`result_stream_writer` creates an idle `ResultStreamWriter` and writes nothing. Both `T: Schema` and `E: Schema` are required because the document schema describes both branches, even the unselected one. `start_ok(self)` writes the header, schema and Ok variant index, returning an already-open `ListStreamWriter`; do not call `start_list` again. Use `write`, `writes` and `end_list` as usual. Alternatively, `write_err(self, &E)` writes the complete error branch. These consuming methods prevent selecting both branches on the same writer. Only the selected payload needs `Serialize`. Schema validation precedes output, but serialization and I/O failures may leave partial output. No method flushes the destination or automatically finishes a dropped List writer.
+
+`result_stream_reader` returns `Result<ResultStreamReader<T, E, R>, AsonbError>` and requires `T: DeserializeOwned`, `E: DeserializeOwned`, and `R: Read`; neither payload type needs `Schema` when reading. It validates the header and root Result schema and selects the variant by name rather than assuming a fixed wire index. An `Ok(ListStreamReader<T, R>)` decodes List elements incrementally; an `Err(E)` decodes the complete business error before returning. Business errors are successful decoding outcomes, while schema, payload and I/O errors use `AsonbError`. List element errors are returned during iteration, once, followed by permanent exhaustion.
+
+Unlike a root MultiChunk List, the List inside Result requires an explicit zero-count end marker: EOF at a chunk boundary is truncation, not success. Consume the iterator to its end to validate the marker; stopping early leaves the remaining payload unvalidated. Neither Result branch probes for EOF or trailing bytes. Pass `&mut reader` to retain the source after dropping the stream; bytes after a completed Result remain unread.
+
+Ordinary Serde readers can decode documents produced by the Result stream writer as `Result<Vec<T>, E>`. However, ordinary `ser_to_bytes` uses Regular Lists for `Vec<T>`, so its `Ok(Vec<T>)` documents are not accepted by `result_stream_reader`; use the Result stream writer to select MultiChunk framing. An ordinary Result error document is accepted when its selected `Err` payload is compatible with `E`. Different List encodings or chunk boundaries need not produce identical bytes.
 
 ### 3.3 Rust Type Mappings
 
@@ -1094,7 +1135,7 @@ ASONB's focus is schema-described ASON values, forward-only streaming, and predi
 ## 7 Links
 
 - [ASON Specification](https://github.com/hemashushu/ason/blob/main/docs/specification.md)
-- [ASON Library (Rust)](https://github.com/hemashushu/ason)
+- [ASON Converters (ason2b, ason2j)](https://github.com/hemashushu/ason-converter)
 
 ## 8 License
 

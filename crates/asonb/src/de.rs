@@ -96,8 +96,77 @@ pub fn list_stream_reader<T: de::DeserializeOwned, R: Read>(
         item: *item,
         remaining: 0,
         finished: false,
+        root: true,
         marker: PhantomData,
     })
+}
+
+/// Opens a Result containing a streamed MultiChunk List or an owned business error.
+///
+/// `T` is the List element type and `E` is the error payload type. Construction
+/// reads the header, schema and variant index, but no successful List elements.
+/// An Err payload is decoded in full before returning. Neither branch checks EOF
+/// or trailing bytes. Unlike a root List, the nested List requires a zero-count
+/// terminator; consume the iterator to its end to validate the complete payload.
+///
+/// ```
+/// let mut bytes = Vec::new();
+/// let mut writer = asonb::result_stream_writer::<i32, String, _>(&mut bytes).start_ok()?;
+/// writer.writes(&[10, 20])?;
+/// writer.end_list()?;
+/// match asonb::result_stream_reader::<i32, String, _>(bytes.as_slice())? {
+///     asonb::ResultStreamReader::Ok(stream) => {
+///         assert_eq!(stream.collect::<Result<Vec<_>, _>>()?, [10, 20]);
+///     }
+///     asonb::ResultStreamReader::Err(error) => panic!("{error}"),
+/// }
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
+pub fn result_stream_reader<T: de::DeserializeOwned, E: de::DeserializeOwned, R: Read>(
+    reader: R,
+) -> Result<ResultStreamReader<T, E, R>, AsonbError> {
+    let mut input = ReaderInput::new(reader);
+    input.header()?;
+    let schema = DocumentSchema::read(&mut input)?;
+    let root = schema.resolve(schema.root.clone())?;
+    if !matches!(&root, Type::Enum(name, _) if name == "Result") {
+        return Err(AsonbError::Message(
+            "Result streaming requires a root Result enumeration.".into(),
+        ));
+    }
+    let (_, variant) = Deserializer::new(&mut input, &schema, root, true).enumeration()?;
+    match variant {
+        Variant::Newtype(name, ty) if name == "Ok" => {
+            let Type::List(Encoding::MultiChunk, item) = schema.resolve(ty)? else {
+                return Err(AsonbError::Message(
+                    "Result streaming requires a multi-chunk List in Ok.".into(),
+                ));
+            };
+            Ok(ResultStreamReader::Ok(ListStreamReader {
+                input,
+                schema,
+                item: *item,
+                remaining: 0,
+                finished: false,
+                root: false,
+                marker: PhantomData,
+            }))
+        }
+        Variant::Newtype(name, ty) if name == "Err" => {
+            E::deserialize(&mut Deserializer::new(&mut input, &schema, ty, false))
+                .map(ResultStreamReader::Err)
+        }
+        _ => Err(AsonbError::MessageWithOffset(
+            "Expected a single-value Result::Ok or Result::Err variant.".into(),
+            input.offset() - 4,
+        )),
+    }
+}
+
+/// A successful List decoded incrementally, or a fully decoded business error.
+pub enum ResultStreamReader<T, E, R: Read> {
+    Ok(ListStreamReader<T, R>),
+    Err(E),
 }
 
 /// Opens a document for dynamic inspection, streaming only MultiChunk root Lists.
@@ -710,8 +779,9 @@ impl<'de, I: Input<'de>> VariantAccess<'de> for VariantAccessor<'_, '_, 'de, I> 
     }
 }
 
-/// Incremental root List reader. It is fused after its marker, EOF, or first
-/// error, and never probes beyond an explicit marker for a trailing document.
+/// Incremental MultiChunk List reader, fused after its marker or first error.
+/// Root Lists also accept EOF between chunks; Result-wrapped Lists do not.
+/// It never probes beyond an explicit marker for a trailing document.
 pub struct ListStreamReader<T, R: Read> {
     /// Owned reader wrapper; it consumes only bytes needed for the next item.
     input: ReaderInput<R>,
@@ -723,6 +793,7 @@ pub struct ListStreamReader<T, R: Read> {
     remaining: u64,
     /// Latches marker, clean root EOF, or the first error permanently.
     finished: bool,
+    root: bool,
     /// Describes the yielded Rust type without retaining any decoded value.
     marker: PhantomData<fn() -> T>,
 }
@@ -845,7 +916,7 @@ impl<T: de::DeserializeOwned, R: Read> Iterator for ListStreamReader<T, R> {
         }
         let result = (|| {
             if self.remaining == 0 {
-                self.remaining = self.input.chunk(true)? as u64;
+                self.remaining = self.input.chunk(self.root)? as u64;
                 if self.remaining == 0 {
                     return Ok(None);
                 }
@@ -879,6 +950,183 @@ impl<R: Read> FusedIterator for ValueDocumentReader<R> {}
 mod tests {
     use super::*;
     use crate::ser::{list_stream_writer, ser_to_bytes};
+
+    #[test]
+    fn test_result_stream_reader() {
+        let ty = Type::Enum(
+            "Result".into(),
+            vec![
+                Variant::Newtype("Err".into(), Type::String(Encoding::Regular)),
+                Variant::Newtype(
+                    "Ok".into(),
+                    Type::List(Encoding::MultiChunk, Box::new(Type::I32)),
+                ),
+            ],
+        );
+        let mut payload = 1u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&2u32.to_le_bytes());
+        payload.extend_from_slice(&11i32.to_le_bytes());
+        payload.extend_from_slice(&13i32.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        let bytes = crate::test_utils::document(ty.clone(), &payload);
+        let ResultStreamReader::Ok(stream) =
+            result_stream_reader::<i32, String, _>(bytes.as_slice()).unwrap()
+        else {
+            panic!("expected a streamed List");
+        };
+        assert_eq!(stream.collect::<Result<Vec<_>, _>>().unwrap(), [11, 13]);
+
+        for end in 0..bytes.len() {
+            if let Ok(ResultStreamReader::Ok(mut stream)) =
+                result_stream_reader::<i32, String, _>(&bytes[..end])
+            {
+                assert!(
+                    stream.by_ref().collect::<Result<Vec<_>, _>>().is_err(),
+                    "truncated at {end}"
+                );
+                assert!(stream.next().is_none());
+            }
+        }
+
+        let bytes = crate::test_utils::document(ty, &[1, 0, 0, 0, 0, 0, 0, 0]);
+        let ResultStreamReader::Ok(mut stream) =
+            result_stream_reader::<i32, String, _>(bytes.as_slice()).unwrap()
+        else {
+            panic!("expected an empty streamed List");
+        };
+        assert!(stream.next().is_none());
+        assert!(stream.next().is_none());
+
+        let bytes = ser_to_bytes(&Err::<Vec<i32>, _>("failed")).unwrap();
+        assert!(
+            matches!(result_stream_reader::<i32, String, _>(bytes.as_slice()).unwrap(), ResultStreamReader::Err(error) if error == "failed")
+        );
+    }
+
+    #[test]
+    fn test_result_stream_reader_invalid_inputs() {
+        for ty in [
+            Type::List(Encoding::MultiChunk, Box::new(Type::I32)),
+            Type::Enum(
+                "Other".into(),
+                vec![Variant::Newtype("Ok".into(), Type::I32)],
+            ),
+            Type::Enum(
+                "Result".into(),
+                vec![Variant::Newtype("Ok".into(), Type::I32)],
+            ),
+            Type::Enum(
+                "Result".into(),
+                vec![Variant::Newtype(
+                    "Ok".into(),
+                    Type::List(Encoding::Regular, Box::new(Type::I32)),
+                )],
+            ),
+            Type::Enum("Result".into(), vec![Variant::Unit("Ok".into())]),
+            Type::Enum("Result".into(), vec![Variant::Unit("Err".into())]),
+            Type::Enum(
+                "Result".into(),
+                vec![Variant::Tuple("Ok".into(), vec![Type::I32, Type::I32])],
+            ),
+            Type::Enum(
+                "Result".into(),
+                vec![Variant::Newtype("Other".into(), Type::I32)],
+            ),
+        ] {
+            let bytes = crate::test_utils::document(ty, &[0; 16]);
+            assert!(result_stream_reader::<i32, String, _>(bytes.as_slice()).is_err());
+        }
+        let ty = Type::Enum(
+            "Result".into(),
+            vec![Variant::Newtype(
+                "Ok".into(),
+                Type::List(Encoding::MultiChunk, Box::new(Type::I32)),
+            )],
+        );
+        let bytes = crate::test_utils::document(ty.clone(), &1u32.to_le_bytes());
+        assert!(result_stream_reader::<i32, String, _>(bytes.as_slice()).is_err());
+        let bytes = crate::test_utils::document(ty, &[]);
+        assert!(result_stream_reader::<i32, String, _>(bytes.as_slice()).is_err());
+
+        let mut bytes = Vec::new();
+        let mut writer = crate::result_stream_writer::<i32, String, _>(&mut bytes)
+            .start_ok()
+            .unwrap();
+        writer.write(&11).unwrap();
+        writer.end_list().unwrap();
+        let ResultStreamReader::Ok(mut stream) =
+            result_stream_reader::<String, String, _>(bytes.as_slice()).unwrap()
+        else {
+            panic!("expected a streamed List")
+        };
+        assert!(stream.next().unwrap().is_err());
+        assert!(stream.next().is_none());
+        let bytes = ser_to_bytes(&Err::<Vec<i32>, _>(42i32)).unwrap();
+        assert!(result_stream_reader::<i32, String, _>(bytes.as_slice()).is_err());
+    }
+
+    #[test]
+    fn test_result_stream_reader_io_and_boundaries() {
+        use crate::test_utils::FaultReader;
+        let mut success = Vec::new();
+        let mut writer = crate::result_stream_writer::<i32, String, _>(&mut success)
+            .start_ok()
+            .unwrap();
+        writer.writes(&[11, 13]).unwrap();
+        writer.end_list().unwrap();
+        let error = ser_to_bytes(&Err::<Vec<i32>, _>("failed")).unwrap();
+
+        for bytes in [&success, &error] {
+            for fail_at in 0..bytes.len() {
+                let mut source = FaultReader::new(bytes);
+                source.fail_at = fail_at;
+                let error = match result_stream_reader::<i32, String, _>(source) {
+                    Err(error) => error,
+                    Ok(ResultStreamReader::Ok(mut stream)) => {
+                        let error = stream.by_ref().collect::<Result<Vec<_>, _>>().unwrap_err();
+                        assert!(stream.next().is_none());
+                        error
+                    }
+                    Ok(ResultStreamReader::Err(_)) => {
+                        panic!("expected a read failure at {fail_at}")
+                    }
+                };
+                assert!(error.to_string().contains("injected read failure"));
+            }
+
+            let mut source = FaultReader::new(bytes);
+            source.fail_at = bytes.len();
+            match result_stream_reader::<i32, String, _>(&mut source).unwrap() {
+                ResultStreamReader::Ok(stream) => {
+                    assert_eq!(stream.collect::<Result<Vec<_>, _>>().unwrap(), [11, 13])
+                }
+                ResultStreamReader::Err(error) => assert_eq!(error, "failed"),
+            }
+            assert_eq!(source.position, bytes.len());
+
+            let mut suffixed = bytes.clone();
+            suffixed.extend_from_slice(b"following document");
+            let mut source = suffixed.as_slice();
+            if let ResultStreamReader::Ok(stream) =
+                result_stream_reader::<i32, String, _>(&mut source).unwrap()
+            {
+                assert_eq!(stream.collect::<Result<Vec<_>, _>>().unwrap(), [11, 13]);
+            }
+            assert_eq!(source, b"following document");
+        }
+
+        let mut source = FaultReader::new(&success);
+        let boundary = success.len() - 16;
+        {
+            let ResultStreamReader::Ok(stream) =
+                result_stream_reader::<i32, String, _>(&mut source).unwrap()
+            else {
+                panic!("expected a streamed List")
+            };
+            drop(stream);
+        }
+        assert_eq!(source.position, boundary);
+    }
 
     #[test]
     /// Distinguishes lazy MultiChunk List elements from a single materialized root.

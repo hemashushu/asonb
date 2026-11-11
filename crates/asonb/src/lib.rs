@@ -54,6 +54,9 @@
 //! pipeline whose total element count is not known in advance. These operate on
 //! a MultiChunk root List. Writers require an explicit start and end; readers
 //! stop at the marker without probing bytes from a following document.
+//! Use [`result_stream_writer`] and [`result_stream_reader`] for the same
+//! pipeline wrapped in `Result<Vec<T>, E>`. The successful nested List requires
+//! an explicit end marker; business errors are decoded in full before returning.
 //! [`value_document_reader`] makes the same List/non-List distinction while
 //! returning dynamic values rather than a predetermined Rust type.
 //!
@@ -104,8 +107,11 @@ pub use error::AsonbError;
 pub use schema::{DocumentSchema, Encoding, Field, Schema, SchemaBuilder, Type, Variant};
 
 pub use de::{
-    ListStreamReader, ValueDocumentReader, de_from_reader, de_from_slice, list_stream_reader,
-    value_document_reader,
+    ListStreamReader, ResultStreamReader, ValueDocumentReader, de_from_reader, de_from_slice,
+    list_stream_reader, result_stream_reader, value_document_reader,
 };
-pub use ser::{ListStreamWriter, list_stream_writer, ser_to_bytes, ser_to_writer};
+pub use ser::{
+    ListStreamWriter, ResultStreamWriter, list_stream_writer, result_stream_writer, ser_to_bytes,
+    ser_to_writer,
+};
 pub use value::{Value, de_value_from_reader, de_value_from_slice, ser_value_to_writer};

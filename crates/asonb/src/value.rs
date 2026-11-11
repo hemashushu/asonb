@@ -26,108 +26,26 @@ const MAX_ASON_UTC_OFFSET_SECONDS: i32 = 23 * 60 * 60 + 59 * 60;
 /// order, not Rust discriminant values.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value<'de> {
-    /// A signed 8-bit payload, matching Type::I8 exactly.
-    I8(
-        /// The integer value.
-        i8,
-    ),
-    /// A signed 16-bit payload.
-    I16(
-        /// The integer value.
-        i16,
-    ),
-    /// A signed 32-bit payload.
-    I32(
-        /// The integer value.
-        i32,
-    ),
-    /// A signed 64-bit payload.
-    I64(
-        /// The integer value.
-        i64,
-    ),
-    /// An unsigned 8-bit payload, not a byte-data container.
-    U8(
-        /// The integer value.
-        u8,
-    ),
-    /// An unsigned 16-bit payload.
-    U16(
-        /// The integer value.
-        u16,
-    ),
-    /// An unsigned 32-bit payload.
-    U32(
-        /// The integer value.
-        u32,
-    ),
-    /// An unsigned 64-bit payload.
-    U64(
-        /// The integer value.
-        u64,
-    ),
-    /// A single-precision value; writing normalizes NaN to a canonical quiet NaN.
-    F32(
-        /// The floating-point value.
-        f32,
-    ),
-    /// A double-precision value; writing normalizes NaN to a canonical quiet NaN.
-    F64(
-        /// The floating-point value.
-        f64,
-    ),
-    /// A Boolean; writers use zero or one, while readers accept any nonzero byte.
-    Bool(
-        /// The logical value.
-        bool,
-    ),
-    /// A Unicode scalar, never an isolated surrogate or an arbitrary u32.
-    Char(
-        /// The decoded character.
-        char,
-    ),
-    /// Whole UTC seconds since the Unix epoch, covering the full wire i64 range.
-    DateTime(
-        /// Seconds, with negative values before the epoch.
-        i64,
-    ),
-    /// Valid UTF-8, borrowed only when the input storage can be reused directly.
-    String(
-        /// Text without a trailing NUL requirement.
-        Cow<'de, str>,
-    ),
-    /// Opaque bytes; unlike String, no UTF-8 validation is performed.
-    Bytes(
-        /// Borrowed or owned byte data.
-        Cow<'de, [u8]>,
-    ),
-    /// Homogeneous elements whose common type comes from the schema.
-    List(
-        /// Elements in wire order, with chunk boundaries removed.
-        Vec<Value<'de>>,
-    ),
-    /// Key/value pairs kept in wire order without imposing Rust map semantics.
-    Map(
-        /// Ordered pairs; duplicate keys are not removed.
-        Vec<(Value<'de>, Value<'de>)>,
-    ),
-    /// Positional values, also used as an empty payload for a unit enum variant.
-    Tuple(
-        /// One value for each tuple position.
-        Vec<Value<'de>>,
-    ),
-    /// Field values without names; their order must match the schema's fields.
-    Object(
-        /// One value for each field in schema order.
-        Vec<Value<'de>>,
-    ),
-    /// A selected variant and its shape-specific payload.
-    Enum(
-        /// Zero-based index into the schema's variant list.
-        u32,
-        /// Empty Tuple for unit, the value for newtype, Tuple or Object otherwise.
-        Box<Value<'de>>,
-    ),
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    F32(f32),
+    F64(f64),
+    Bool(bool),
+    Char(char),
+    DateTime(i64),
+    String(Cow<'de, str>),
+    Bytes(Cow<'de, [u8]>),
+    List(Vec<Value<'de>>),
+    Map(Vec<(Value<'de>, Value<'de>)>),
+    Tuple(Vec<Value<'de>>),
+    Object(Vec<Value<'de>>),
+    Enum(u32, Box<Value<'de>>),
 }
 
 /// Writes a complete document using a caller-selected schema and dynamic value.

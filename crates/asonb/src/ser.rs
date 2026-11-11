@@ -4,7 +4,7 @@
 // the Mozilla Public License version 2.0 and additional exceptions.
 // For more details, see the LICENSE, LICENSE.additional, and CONTRIBUTING files.
 
-//! Schema-guided Serde encoding and forward-only root List production.
+//! Schema-guided Serde encoding and forward-only List and Result production.
 //! Known-length containers write directly; unknown-length regular containers
 //! buffer only their own encoded payload until their count is available.
 
@@ -78,8 +78,99 @@ pub fn list_stream_writer<T: Schema, W: Write>(writer: &mut W) -> ListStreamWrit
     ListStreamWriter {
         writer,
         schema: None,
+        item: None,
         state: StreamState::NotStarted,
         marker: PhantomData,
+    }
+}
+
+/// Creates an idle writer for a Result containing a streamed List or an error.
+///
+/// Both `T` (the List element) and `E` need Schema because the header describes
+/// both branches. Construction writes nothing. Choose one branch with `start_ok`
+/// or `write_err`; either method consumes this writer. No method flushes the sink.
+///
+/// ```
+/// let mut bytes = Vec::new();
+/// let mut stream = asonb::result_stream_writer::<i32, String, _>(&mut bytes).start_ok()?;
+/// stream.writes(&[10, 20])?;
+/// stream.end_list()?;
+/// assert_eq!(asonb::de_from_slice::<Result<Vec<i32>, String>>(&bytes)?, Ok(vec![10, 20]));
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
+pub fn result_stream_writer<T: Schema, E: Schema, W: Write>(
+    writer: &mut W,
+) -> ResultStreamWriter<'_, W, T, E> {
+    ResultStreamWriter {
+        writer,
+        marker: PhantomData,
+    }
+}
+
+struct StreamListSchema<T>(PhantomData<fn() -> T>);
+
+impl<T: Schema> Schema for StreamListSchema<T> {
+    fn schema(builder: &mut crate::SchemaBuilder) -> Result<Type, AsonbError> {
+        Ok(Type::List(
+            Encoding::MultiChunk,
+            Box::new(builder.build::<T>()?),
+        ))
+    }
+}
+
+/// A forward-only Result writer with mutually exclusive, consuming branches.
+pub struct ResultStreamWriter<'a, W: Write, T, E> {
+    writer: &'a mut W,
+    marker: PhantomData<fn(&T, &E)>,
+}
+
+impl<'a, W: Write, T: Schema, E: Schema> ResultStreamWriter<'a, W, T, E> {
+    /// Writes the header, schema and Ok variant index, returning an open List.
+    ///
+    /// Write elements directly without calling `start_list` again, then call
+    /// `end_list` to emit the required zero-count terminator. Dropping the List
+    /// does not finish it. Errors may leave partial output.
+    pub fn start_ok(self) -> Result<ListStreamWriter<'a, W, T>, AsonbError> {
+        let schema = DocumentSchema::of::<Result<StreamListSchema<T>, E>>()?;
+        write_all(self.writer, &HEADER)?;
+        schema.write(self.writer)?;
+        let ty = Serializer::new(self.writer, &schema, schema.root.clone()).variant("Ok", 1)?;
+        let Type::List(_, item) = schema.resolve(ty)? else {
+            unreachable!()
+        };
+        Ok(ListStreamWriter {
+            writer: self.writer,
+            schema: Some(schema),
+            item: Some(*item),
+            state: StreamState::Open,
+            marker: PhantomData,
+        })
+    }
+
+    /// Writes a complete Err branch using its regular single-value encoding.
+    ///
+    /// Only `E` needs Serialize; errors may leave partial output.
+    ///
+    /// ```
+    /// let mut bytes = Vec::new();
+    /// asonb::result_stream_writer::<i32, String, _>(&mut bytes).write_err(&"failed".to_owned())?;
+    /// assert_eq!(asonb::de_from_slice::<Result<Vec<i32>, String>>(&bytes)?, Err("failed".into()));
+    /// # Ok::<(), asonb::AsonbError>(())
+    /// ```
+    pub fn write_err(self, error: &E) -> Result<(), AsonbError>
+    where
+        E: Serialize,
+    {
+        let schema = DocumentSchema::of::<Result<StreamListSchema<T>, E>>()?;
+        write_all(self.writer, &HEADER)?;
+        schema.write(self.writer)?;
+        ser::Serializer::serialize_newtype_variant(
+            &mut Serializer::new(self.writer, &schema, schema.root.clone()),
+            "Result",
+            1,
+            "Err",
+            error,
+        )
     }
 }
 
@@ -605,17 +696,19 @@ enum StreamState {
     Failed,
 }
 
-/// A forward-only root List writer. Drop does not write an end marker.
+/// A forward-only MultiChunk List writer. Drop does not write an end marker.
 ///
 /// Create it with [`list_stream_writer`], call `start_list` once, write any
 /// number of chunks, then call `end_list`. Failed output operations permanently
 /// close the writer because a partially emitted chunk cannot be undone. This
 /// type never flushes the underlying destination automatically.
+/// For a Result-wrapped List, `ResultStreamWriter::start_ok` opens it instead.
 pub struct ListStreamWriter<'a, W: Write, T> {
     /// Borrowed sink, used directly without seeking or whole-list buffering.
     writer: &'a mut W,
-    /// The validated element definitions plus their MultiChunk List root.
+    /// Validated document definitions, including the root and element schema.
     schema: Option<DocumentSchema>,
+    item: Option<Type>,
     /// Guards ordering and prevents reuse after potentially partial writes.
     state: StreamState,
     /// Ties the stream's API to T without storing or owning a T value.
@@ -646,10 +739,12 @@ impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
         // restore a usable state; unwinding or an early error leaves it closed.
         self.state = StreamState::Failed;
         let mut schema = DocumentSchema::of::<T>()?;
+        let item = schema.root.clone();
         schema.root = Type::List(Encoding::MultiChunk, Box::new(schema.root));
         write_all(self.writer, &HEADER)?;
         schema.write(self.writer)?;
         self.schema = Some(schema);
+        self.item = Some(item);
         self.state = StreamState::Open;
         Ok(())
     }
@@ -681,11 +776,12 @@ impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
             .schema
             .as_ref()
             .ok_or_else(|| AsonbError::Message("Missing stream schema.".into()))?;
-        let Type::List(_, item) = &schema.root else {
-            unreachable!()
-        };
+        let item = self
+            .item
+            .as_ref()
+            .ok_or_else(|| AsonbError::Message("Missing stream item schema.".into()))?;
         write_u32(self.writer, 1)?;
-        value.serialize(&mut Serializer::new(self.writer, schema, (**item).clone()))?;
+        value.serialize(&mut Serializer::new(self.writer, schema, item.clone()))?;
         self.state = StreamState::Open;
         Ok(())
     }
@@ -719,14 +815,15 @@ impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
             .schema
             .as_ref()
             .ok_or_else(|| AsonbError::Message("Missing stream schema.".into()))?;
-        let Type::List(_, item) = &schema.root else {
-            unreachable!()
-        };
+        let item = self
+            .item
+            .as_ref()
+            .ok_or_else(|| AsonbError::Message("Missing stream item schema.".into()))?;
         // An empty slice writes nothing, since a zero count is the end marker.
         if !values.is_empty() {
             write_u32(self.writer, values.len() as u64)?;
             for value in values {
-                value.serialize(&mut Serializer::new(self.writer, schema, (**item).clone()))?;
+                value.serialize(&mut Serializer::new(self.writer, schema, item.clone()))?;
             }
         }
         self.state = StreamState::Open;
@@ -761,6 +858,171 @@ impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_result_stream_writer() {
+        for values in [vec![], vec![11i32, 13]] {
+            let mut bytes = Vec::new();
+            let mut stream = result_stream_writer::<i32, String, _>(&mut bytes)
+                .start_ok()
+                .unwrap();
+            assert!(stream.start_list().is_err());
+            stream.writes(&[]).unwrap();
+            for value in &values {
+                stream.write(value).unwrap();
+            }
+            stream.end_list().unwrap();
+            assert!(stream.write(&17).is_err());
+            assert!(stream.end_list().is_err());
+            assert_eq!(
+                crate::de_from_slice::<Result<Vec<i32>, String>>(&bytes).unwrap(),
+                Ok(values.clone())
+            );
+            let crate::ResultStreamReader::Ok(reader) =
+                crate::result_stream_reader::<i32, String, _>(bytes.as_slice()).unwrap()
+            else {
+                panic!("expected a streamed List")
+            };
+            assert_eq!(reader.collect::<Result<Vec<_>, _>>().unwrap(), values);
+
+            let schema = DocumentSchema::of::<Result<StreamListSchema<i32>, String>>().unwrap();
+            let mut expected = HEADER.to_vec();
+            schema.write(&mut expected).unwrap();
+            Ok::<_, String>(&values)
+                .serialize(&mut Serializer::new(
+                    &mut expected,
+                    &schema,
+                    schema.root.clone(),
+                ))
+                .unwrap();
+            assert_eq!(bytes, expected);
+        }
+
+        let values = [Some(vec![11i32, 13]), None, Some(vec![])];
+        let mut bytes = Vec::new();
+        let mut stream = result_stream_writer::<Option<Vec<i32>>, Vec<String>, _>(&mut bytes)
+            .start_ok()
+            .unwrap();
+        stream.write(&values[0]).unwrap();
+        stream.writes(&values[1..]).unwrap();
+        stream.end_list().unwrap();
+        assert_eq!(
+            crate::de_from_slice::<Result<Vec<Option<Vec<i32>>>, Vec<String>>>(&bytes).unwrap(),
+            Ok(values.to_vec())
+        );
+
+        let error = vec!["failed".to_owned(), "details".to_owned()];
+        let mut bytes = Vec::new();
+        result_stream_writer::<Option<Vec<i32>>, Vec<String>, _>(&mut bytes)
+            .write_err(&error)
+            .unwrap();
+        assert_eq!(
+            crate::de_from_slice::<Result<Vec<Option<Vec<i32>>>, Vec<String>>>(&bytes).unwrap(),
+            Err(error.clone())
+        );
+        assert!(
+            matches!(crate::result_stream_reader::<Option<Vec<i32>>, Vec<String>, _>(bytes.as_slice()).unwrap(), crate::ResultStreamReader::Err(actual) if actual == error)
+        );
+    }
+
+    #[test]
+    fn test_result_stream_writer_schema_requirements() {
+        struct SchemaOnly;
+        impl Schema for SchemaOnly {
+            fn schema(_: &mut crate::SchemaBuilder) -> Result<Type, AsonbError> {
+                Ok(Type::I32)
+            }
+        }
+        struct Invalid;
+        impl Schema for Invalid {
+            fn schema(_: &mut crate::SchemaBuilder) -> Result<Type, AsonbError> {
+                Ok(Type::Tuple(vec![]))
+            }
+        }
+        let mut bytes = Vec::new();
+        result_stream_writer::<SchemaOnly, String, _>(&mut bytes)
+            .write_err(&"failed".to_owned())
+            .unwrap();
+        assert_eq!(
+            crate::de_from_slice::<Result<Vec<i32>, String>>(&bytes).unwrap(),
+            Err("failed".to_owned())
+        );
+        let mut bytes = Vec::new();
+        result_stream_writer::<i32, SchemaOnly, _>(&mut bytes)
+            .start_ok()
+            .unwrap()
+            .end_list()
+            .unwrap();
+        assert_eq!(
+            crate::de_from_slice::<Result<Vec<i32>, i32>>(&bytes).unwrap(),
+            Ok(vec![])
+        );
+        let mut bytes = Vec::new();
+        assert!(
+            result_stream_writer::<i32, Invalid, _>(&mut bytes)
+                .start_ok()
+                .is_err()
+        );
+        assert!(bytes.is_empty());
+        assert!(
+            result_stream_writer::<Invalid, String, _>(&mut bytes)
+                .write_err(&"failed".to_owned())
+                .is_err()
+        );
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn test_result_stream_writer_io_errors() {
+        use crate::test_utils::FaultWriter;
+        let mut expected = Vec::new();
+        let mut stream = result_stream_writer::<i32, String, _>(&mut expected)
+            .start_ok()
+            .unwrap();
+        stream.writes(&[11, 13]).unwrap();
+        stream.end_list().unwrap();
+        for fail_at in 0..expected.len() {
+            let mut writer = FaultWriter {
+                fail_at,
+                ..FaultWriter::default()
+            };
+            if let Ok(mut stream) = result_stream_writer::<i32, String, _>(&mut writer).start_ok() {
+                if stream.writes(&[11, 13]).is_ok() {
+                    assert!(stream.end_list().is_err());
+                }
+                assert!(stream.write(&17).is_err());
+                assert!(stream.end_list().is_err());
+            }
+            assert_eq!(writer.bytes, expected[..fail_at]);
+        }
+        let mut expected = Vec::new();
+        result_stream_writer::<i32, String, _>(&mut expected)
+            .write_err(&"failed".to_owned())
+            .unwrap();
+        for fail_at in 0..expected.len() {
+            let mut writer = FaultWriter {
+                fail_at,
+                ..FaultWriter::default()
+            };
+            assert!(
+                result_stream_writer::<i32, String, _>(&mut writer)
+                    .write_err(&"failed".to_owned())
+                    .is_err()
+            );
+            assert_eq!(writer.bytes, expected[..fail_at]);
+        }
+        let mut writer = FaultWriter {
+            zero: true,
+            ..FaultWriter::default()
+        };
+        assert!(
+            result_stream_writer::<i32, String, _>(&mut writer)
+                .start_ok()
+                .is_err()
+        );
+        assert!(writer.bytes.is_empty());
+    }
+
     #[test]
     /// Locks down primitive framing, embedded NUL handling, and canonical NaN.
     fn test_primitive_bytes() {
