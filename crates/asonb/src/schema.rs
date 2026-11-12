@@ -249,7 +249,9 @@ impl DocumentSchema {
     /// Checks the root and every reference entry, including unused definitions.
     ///
     /// Rejects missing or cyclic references, invalid field/enum identifiers,
-    /// duplicate field/variant names, and invalid container arities. Successful
+    /// reserved ASON tokens used as field names, redefinitions of the predefined
+    /// `Option` and `Result` enumerations, duplicate field/variant names, and
+    /// invalid container arities. Successful
     /// validation does not impose a resource quota or prove that a later value
     /// matches the schema. There are no arguments; the schema is left unchanged.
     ///
@@ -344,6 +346,7 @@ impl DocumentSchema {
                         }
                     }
                 }
+                validate_predefined_enumeration(name, variants)?;
                 children
             }
             _ => vec![],
@@ -412,11 +415,52 @@ fn validate_fields(fields: &[Field]) -> Result<(), AsonbError> {
                 "Field name must be a valid ASON identifier.".into(),
             ));
         }
+        if RESERVED_OBJECT_KEYS.contains(&field.name.as_str()) {
+            return Err(AsonbError::Message(format!(
+                "Field name \"{}\" is reserved by ASON.",
+                field.name
+            )));
+        }
         if !names.insert(&field.name) {
             return Err(AsonbError::Message("Duplicate field name.".into()));
         }
     }
     Ok(())
+}
+
+/// Identifier-shaped ASON tokens that cannot be Object keys: the Boolean
+/// keywords, unsigned special floating-point literals, and the variant
+/// shorthands of the predefined `Option` and `Result` enumerations.
+const RESERVED_OBJECT_KEYS: [&str; 12] = [
+    "true", "false", "NaN", "NaN_f32", "NaN_f64", "Inf", "Inf_f32", "Inf_f64", "Some", "None",
+    "Ok", "Err",
+];
+
+/// Enforces ASON's fixed definitions of the predefined `Option` and `Result`.
+///
+/// `Option` must contain exactly `None` and `Some(T)`; `Result` must contain
+/// exactly `Ok(T)` and `Err(E)`. Payload types and variant order (and thus wire
+/// indices) are free. Names are case-sensitive, so `option` is an ordinary enum.
+fn validate_predefined_enumeration(name: &str, variants: &[Variant]) -> Result<(), AsonbError> {
+    let message = match name {
+        "Option" => "Enumeration \"Option\" must have exactly the variants None and Some(...).",
+        "Result" => "Enumeration \"Result\" must have exactly the variants Ok(...) and Err(...).",
+        _ => return Ok(()),
+    };
+    // Variant names are already known to be unique, so two matching variants
+    // are exactly the required pair.
+    let valid = variants.len() == 2
+        && variants.iter().all(|variant| match (name, variant) {
+            ("Option", Variant::Unit(variant)) => variant == "None",
+            ("Option", Variant::Newtype(variant, _)) => variant == "Some",
+            ("Result", Variant::Newtype(variant, _)) => variant == "Ok" || variant == "Err",
+            _ => false,
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(AsonbError::Message(message.into()))
+    }
 }
 
 /// Applies ASON's identifier ranges, which deliberately differ from Rust's.
@@ -1129,6 +1173,159 @@ mod tests {
             root: Type::Reference(0),
         };
         shared.validate().unwrap();
+    }
+
+    #[test]
+    /// Fixes the variant names and payload forms of `Option` and `Result`.
+    fn test_predefined_enumerations() {
+        let none = || Variant::Unit("None".into());
+        let some = |ty| Variant::Newtype("Some".into(), ty);
+        let ok = |ty| Variant::Newtype("Ok".into(), ty);
+        let err = |ty| Variant::Newtype("Err".into(), ty);
+
+        // Any payload types and either variant order are allowed.
+        for (name, variants) in [
+            ("Option", vec![none(), some(Type::I32)]),
+            ("Option", vec![some(Type::String(Encoding::Long)), none()]),
+            (
+                "Result",
+                vec![ok(Type::I32), err(Type::String(Encoding::Regular))],
+            ),
+            (
+                "Result",
+                vec![err(Type::Bool), ok(Type::Tuple(vec![Type::I8]))],
+            ),
+            // Names are case-sensitive, so these are ordinary user enumerations.
+            ("option", vec![Variant::Unit("Other".into())]),
+            ("RESULT", vec![ok(Type::I32)]),
+        ] {
+            DocumentSchema::new(Type::Enum(name.into(), variants))
+                .validate()
+                .unwrap();
+        }
+        DocumentSchema::of::<Option<Result<Vec<i32>, String>>>().unwrap();
+
+        for (name, variants) in [
+            ("Option", vec![]),
+            ("Option", vec![none()]),
+            ("Option", vec![some(Type::I32)]),
+            (
+                "Option",
+                vec![none(), some(Type::I32), Variant::Unit("Other".into())],
+            ),
+            (
+                "Option",
+                vec![Variant::Newtype("None".into(), Type::I32), some(Type::I32)],
+            ),
+            ("Option", vec![none(), Variant::Unit("Some".into())]),
+            (
+                "Option",
+                vec![
+                    none(),
+                    Variant::Tuple("Some".into(), vec![Type::I32, Type::I32]),
+                ],
+            ),
+            (
+                "Option",
+                vec![
+                    none(),
+                    Variant::Struct("Some".into(), vec![Field::new("x", Type::I32)]),
+                ],
+            ),
+            (
+                "Option",
+                vec![Variant::Unit("none".into()), some(Type::I32)],
+            ),
+            (
+                "Option",
+                vec![none(), Variant::Newtype("SOME".into(), Type::I32)],
+            ),
+            ("Result", vec![ok(Type::I32)]),
+            ("Result", vec![err(Type::I32)]),
+            (
+                "Result",
+                vec![ok(Type::I32), err(Type::I32), Variant::Unit("Other".into())],
+            ),
+            ("Result", vec![Variant::Unit("Ok".into()), err(Type::I32)]),
+            ("Result", vec![ok(Type::I32), Variant::Unit("Err".into())]),
+            (
+                "Result",
+                vec![
+                    ok(Type::I32),
+                    Variant::Tuple("Err".into(), vec![Type::I32, Type::I32]),
+                ],
+            ),
+            (
+                "Result",
+                vec![Variant::Newtype("ok".into(), Type::I32), err(Type::I32)],
+            ),
+            ("Result", vec![none(), some(Type::I32)]),
+            ("Option", vec![ok(Type::I32), err(Type::I32)]),
+        ] {
+            let ty = Type::Enum(name.into(), variants);
+            let expected = format!(
+                "Enumeration \"{name}\" must have exactly the variants {}.",
+                if name == "Option" {
+                    "None and Some(...)"
+                } else {
+                    "Ok(...) and Err(...)"
+                }
+            );
+            assert!(
+                matches!(DocumentSchema::new(ty.clone()).validate(), Err(AsonbError::Message(message)) if message == expected),
+                "accepted {ty:?}"
+            );
+            // Unused reference definitions are validated too, including on read.
+            let schema = DocumentSchema {
+                references: vec![ty],
+                root: Type::I32,
+            };
+            let mut bytes = crate::binary::HEADER.to_vec();
+            schema.write(&mut bytes).unwrap();
+            bytes.extend_from_slice(&11i32.to_le_bytes());
+            assert!(crate::de_from_slice::<i32>(&bytes).is_err());
+        }
+    }
+
+    #[test]
+    /// Rejects ASON reserved tokens as Object and object-like variant keys.
+    fn test_reserved_object_keys() {
+        for key in [
+            "true", "false", "NaN", "NaN_f32", "NaN_f64", "Inf", "Inf_f32", "Inf_f64", "Some",
+            "None", "Ok", "Err",
+        ] {
+            let expected = format!("Field name \"{key}\" is reserved by ASON.");
+            for ty in [
+                Type::Object("".into(), vec![Field::new(key, Type::I32)]),
+                Type::Enum(
+                    "E".into(),
+                    vec![Variant::Struct(
+                        "V".into(),
+                        vec![Field::new(key, Type::I32)],
+                    )],
+                ),
+            ] {
+                assert!(
+                    matches!(DocumentSchema::new(ty).validate(), Err(AsonbError::Message(message)) if message == expected),
+                    "accepted reserved key {key}"
+                );
+            }
+        }
+
+        // Only exact spellings are reserved; enumeration and variant names are unaffected.
+        for key in [
+            "some", "NONE", "ok", "ERR", "True", "nan", "Inf_i32", "Some_",
+        ] {
+            DocumentSchema::new(Type::Object("".into(), vec![Field::new(key, Type::I32)]))
+                .validate()
+                .unwrap();
+        }
+        DocumentSchema::new(Type::Enum(
+            "Some".into(),
+            vec![Variant::Unit("None".into()), Variant::Unit("Ok".into())],
+        ))
+        .validate()
+        .unwrap();
     }
 
     #[test]

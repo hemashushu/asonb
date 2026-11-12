@@ -254,6 +254,62 @@ fn test_field_and_variant_name_resolution() {
 }
 
 #[test]
+/// Derived types cannot redefine Option/Result or use reserved Object keys.
+fn test_predefined_enumerations_and_reserved_keys() {
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    /// A user enum reusing the predefined name with an extra variant.
+    enum Option {
+        /// Matches the predefined unit variant.
+        None,
+        /// Matches the predefined single-value variant.
+        Some(i32),
+        /// Not part of the predefined definition.
+        Other,
+    }
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    #[serde(rename = "Result")]
+    /// Renamed to the predefined name, with a changed payload form.
+    enum Outcome {
+        /// Must carry exactly one value in the predefined definition.
+        Ok,
+        /// Matches the predefined single-value variant.
+        Err(String),
+    }
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    /// An Object whose key is an ASON variant shorthand.
+    struct Reserved {
+        #[serde(rename = "None")]
+        /// Renamed to a reserved token.
+        none: i32,
+    }
+    assert!(DocumentSchema::of::<Option>().is_err());
+    assert!(ser_to_bytes(&Option::None).is_err());
+    assert!(ser_to_bytes(&Outcome::Ok).is_err());
+    assert!(ser_to_bytes(&Reserved { none: 1 }).is_err());
+
+    // Rust's Option and Result still map to the predefined enumerations, and
+    // matching by name keeps either wire variant order decodable.
+    let schema = DocumentSchema::new(Type::Enum(
+        "Option".into(),
+        vec![
+            Variant::Newtype("Some".into(), Type::I32),
+            Variant::Unit("None".into()),
+        ],
+    ));
+    for (value, expected) in [
+        (Value::Enum(0, Box::new(Value::I32(11))), Some(11)),
+        (Value::Enum(1, Box::new(Value::Tuple(vec![]))), None),
+    ] {
+        let mut bytes = Vec::new();
+        ser_value_to_writer(&schema, &value, &mut bytes).unwrap();
+        assert_eq!(
+            de_from_slice::<std::option::Option<i32>>(&bytes).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 /// Checks binary DateTime/Byte Data adapters independently of their Rust types.
 fn test_date_time_and_bytes_adapters() {
     #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]

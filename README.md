@@ -301,7 +301,7 @@ Ordinary Serde readers can decode documents produced by the Result stream writer
 
 ### 3.3 Rust Type Mappings
 
-Primitive types retain their widths. `usize` and `isize` use `u64` and `i64`, respectively, following Serde's mapping. `Vec<T>` and slices use Lists; Rust arrays and tuples use Tuples. Named structs use Objects, and enums use the four Enumeration payload forms. `Option<T>` and `Result<T, E>` retain their variant names. Ownership wrappers such as `Box<T>` serialize their contents, not pointer identities.
+Primitive types retain their widths. `usize` and `isize` use `u64` and `i64`, respectively, following Serde's mapping. `Vec<T>` and slices use Lists; Rust arrays and tuples use Tuples. Named structs use Objects, and enums use the four Enumeration payload forms. `Option<T>` and `Result<T, E>` map to ASON's [predefined Enumerations](#4311-enumerations) `Option` and `Result`, retaining their variant names. A user-defined enum named (or renamed to) `Option` or `Result` is rejected unless it matches the predefined definition, and Object fields cannot be named (or renamed to) reserved ASON tokens such as `Some` or `true`; see [Type Definitions](#42-type-definitions). Ownership wrappers such as `Box<T>` serialize their contents, not pointer identities.
 
 The following Rust types are not supported:
 
@@ -405,7 +405,9 @@ To align with ASON, the following constraints apply:
 
 - A Tuple must contain at least one element.
 - An ASONB Object schema must contain at least one field, and its field names must be unique. ASON's `{}` text form is a shorthand for omitting fields with defaults in the target type; it does not represent an empty Object. ASONB object-like variant schemas must also contain at least one field, though ASON text can omit their defaulted fields in the same way.
+- Object field names, including those of object-like variants, must not be ASON reserved tokens: the Boolean keywords `true` and `false`, the special floating-point literals `NaN`, `NaN_f32`, `NaN_f64`, `Inf`, `Inf_f32`, and `Inf_f64`, and the predefined variant names `Some`, `None`, `Ok`, and `Err`. Matching is case-sensitive, so `some` or `NONE` are ordinary identifiers. Enumeration and variant names are not restricted by this rule.
 - A tuple-like variant must contain at least two elements. Zero-element and one-element tuple-like variants are invalid; in textual ASON, the one-element form conflicts with a single-value variant. A single-value variant may itself contain a nonempty Tuple.
+- The Enumerations `Option` and `Result` are predefined by ASON and cannot be redefined. See [Enumerations](#4311-enumerations) for details.
 - ASON Maps are ordered sequences of key-value pairs, and the ASON specification does not impose a uniqueness constraint on Map keys. ASONB preserves the pairs in sequence and leaves duplicate-key handling to applications. Duplicate Object field names are rejected by schema validation.
 
 Lists and Maps may be empty. In ASON, an empty List or Map gets its type from the expected target type; `[]` alone does not distinguish them. Schema validation checks ASONB structural constraints even for unused reference definitions and unselected variants.
@@ -985,6 +987,17 @@ An enumeration value starts with the variant's zero-based index (`u32`), followe
 
 The index identifies a variant in this document's schema, not a stable identifier across documents or application types. Decoders must reject out-of-range indices. When mapping to an application enumeration, match variants by name rather than assuming the same index order.
 
+Two Enumerations are predefined by ASON, and ASONB schemas must follow their definitions exactly:
+
+| Enumeration | Required variants                                            |
+|-------------|--------------------------------------------------------------|
+| `Option`    | `None` (no payload) and `Some` (single-value payload)        |
+| `Result`    | `Ok` (single-value payload) and `Err` (single-value payload) |
+
+An Enumeration named `Option` or `Result` must contain exactly these two variants, with exactly these names and payload forms; adding, removing, or renaming a variant, or changing its payload form (for example, a unit `Ok` or a tuple-like `Some`), is invalid. The payload types are free, and so is the variant order, since variants are matched by name. Names are case-sensitive: `option` or `RESULT` names an ordinary user-defined Enumeration, while a variant named `some` does not satisfy `Option`. Like other structural constraints, this applies to unused reference definitions and is checked by both writers and readers.
+
+ASON text also accepts the shorthand forms `Some(value)`, `None`, `Ok(value)`, and `Err(error)`. ASONB has no shorthand encoding: these values always use the fully qualified `Option` and `Result` Enumeration schemas described here. The shorthand names are reserved and cannot be used as Object field names (see [Type Definitions](#42-type-definitions)).
+
 For example, `Option` has two variants: `None` with no payload and `Some` with one `i32` payload. Its type definition is:
 
 ```text
@@ -1108,9 +1121,11 @@ Note that this example shows only the reference-type table; a complete document 
 
 ### 4.5 Conversion to and from ASON
 
-The [ASON standard](https://github.com/hemashushu/ason/blob/main/docs/specification.md) governs conversion between ASON text and ASONB. The binary format does not extend ASON's text syntax or relax its value constraints. This crate does not implement ASON text conversion.
+The [ASON standard](https://github.com/hemashushu/ason/blob/main/docs/specification.md) governs conversion between ASON text and ASONB. The binary format does not extend ASON's text syntax or relax its value constraints. This crate does not implement ASON text conversion. For a tool to convert between ASON and ASONB, see [ASON Converter](https://github.com/hemashushu/ason-converter).
 
 Conversion preserves values when ASON can represent them, but not source formatting, comments, or the choice of binary encoding form. Converting from ASON requires a schema supplied by the application or derived from the expected target type where sufficient type information is available. In particular, ASON uses that context to determine whether `[]` is an empty List or Map and to resolve its element, key, and value types. When an ASON `[]` cannot be inferred from context, ASONB uses `List<i32>` as the fallback type.
+
+ASON variant shorthands (`Some(value)`, `None`, `Ok(value)`, and `Err(error)`) convert to the same ASONB values as their fully qualified forms (`Option::Some(value)`, `Option::None`, `Result::Ok(value)`, and `Result::Err(error)`); whether the shorthand was used is not preserved.
 
 DateTime conversion applies an ASON time offset when producing the UTC timestamp. Converting back produces a UTC DateTime with offset `+00:00` when the timestamp is representable by ASON's DateTime syntax; the original offset is not recoverable. The chrono adapter rejects nonzero fractional seconds because ASON DateTime and the ASONB representation both use whole-second precision.
 
@@ -1122,13 +1137,13 @@ The file extension for ASONB documents is `.asonb`, and the MIME type is `applic
 
 These formats make different trade-offs; none is uniformly smaller or faster for every workload.
 
-| Format | Relationship to ASONB |
-|--------|-----------------------|
-| BSON | Stores field names with each document and provides a different value type system. ASONB stores Object field names in the schema rather than repeating them for every value of that type. |
-| Protocol Buffers | Uses numbered fields and schema-based messages, with established schema-evolution rules. ASONB embeds its schema in each document and represents ASON's value types directly. |
-| Avro | Also separates schemas from value encodings and supports schema resolution. ASONB uses its own type system and provides multi-chunk String, Byte Data, and List encodings. |
-| CBOR | Uses per-value type information, supports tags, and offers indefinite-length encodings. ASONB instead uses a document schema to describe value layouts. |
-| MessagePack | Uses per-value type information and supports binary and extension types. ASONB describes repeated structures through a schema and defines multi-chunk encodings for incremental production. |
+| Format            | Relationship to ASONB |
+|-------------------|-----------------------|
+| BSON              | Stores field names with each document and provides a different value type system. ASONB stores Object field names in the schema rather than repeating them for every value of that type. |
+| Protocol Buffers  | Uses numbered fields and schema-based messages, with established schema-evolution rules. ASONB embeds its schema in each document and represents ASON's value types directly. |
+| Avro              | Also separates schemas from value encodings and supports schema resolution. ASONB uses its own type system and provides multi-chunk String, Byte Data, and List encodings. |
+| CBOR              | Uses per-value type information, supports tags, and offers indefinite-length encodings. ASONB instead uses a document schema to describe value layouts. |
+| MessagePack       | Uses per-value type information and supports binary and extension types. ASONB describes repeated structures through a schema and defines multi-chunk encodings for incremental production. |
 
 ASONB's focus is schema-described ASON values, forward-only streaming, and predictable offsets for fixed-width layouts. Variable-width layouts still require scanning or an external index. Storage size, access speed, and conversion cost should be compared using representative data and implementations rather than inferred from the format alone.
 
