@@ -11,36 +11,100 @@ use std::borrow::Cow;
 /// A value interpreted according to a separate document schema.
 ///
 /// Container values do not repeat field names, element types, or encoding modes:
-/// those belong to [`DocumentSchema`](crate::DocumentSchema). Strings and bytes may borrow from a slice
-/// document; containers own their child storage. Enumeration indices refer to
-/// schema order, not Rust discriminant values.
+/// those belong to [`DocumentSchema`](crate::DocumentSchema). This is a dynamic
+/// wire-value model, not a Serde data model: use [`crate::ser_value_to_writer`]
+/// and the `de_value_*` functions rather than the typed Serde entry points.
+/// Every variant must match its schema exactly; numeric widths and container
+/// shapes are not converted implicitly.
+///
+/// The lifetime `'de` applies only to borrowed string and byte leaves.
+/// [`crate::de_value_from_slice`] borrows Regular and Long payloads, whereas
+/// MultiChunk payloads are concatenated into owned storage. Reader-based APIs
+/// return `Value<'static>` with owned leaves. All container vectors are owned;
+/// constructing a value does not validate it against a schema.
+///
+/// # Examples
+///
+/// Object values contain only the fields' values, in schema order:
+///
+/// ```
+/// use asonb::{DocumentSchema, Encoding, Field, Type, Value};
+///
+/// let schema = DocumentSchema::new(Type::Object(vec![
+///     Field::new("id", Type::U32),
+///     Field::new("name", Type::String(Encoding::Regular)),
+/// ]));
+/// let value = Value::Object(vec![Value::U32(7), Value::String("sensor".into())]);
+/// let mut bytes = Vec::new();
+/// asonb::ser_value_to_writer(&schema, &value, &mut bytes)?;
+/// assert_eq!(asonb::de_value_from_slice(&bytes)?, (schema, value));
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value<'de> {
+    /// A signed 8-bit integer; matches [`crate::Type::I8`].
     I8(i8),
+    /// A signed 16-bit integer; matches [`crate::Type::I16`].
     I16(i16),
+    /// A signed 32-bit integer; matches [`crate::Type::I32`].
     I32(i32),
+    /// A signed 64-bit integer; matches [`crate::Type::I64`].
     I64(i64),
+    /// An unsigned 8-bit integer; matches [`crate::Type::U8`].
     U8(u8),
+    /// An unsigned 16-bit integer; matches [`crate::Type::U16`].
     U16(u16),
+    /// An unsigned 32-bit integer; matches [`crate::Type::U32`].
     U32(u32),
+    /// An unsigned 64-bit integer; matches [`crate::Type::U64`].
     U64(u64),
+    /// An IEEE 754 single-precision value; writing canonicalizes NaN payload bits.
     F32(f32),
+    /// An IEEE 754 double-precision value; writing canonicalizes NaN payload bits.
     F64(f64),
+    /// A Boolean; readers interpret any nonzero wire byte as `true`.
     Bool(bool),
+    /// A Unicode scalar value, not an arbitrary 32-bit character code.
     Char(char),
+    /// Signed whole seconds since the Unix epoch, without an offset.
+    ///
+    /// All `i64` values are representable here, even outside chrono's supported
+    /// range. This matches [`crate::Type::DateTime`], not [`crate::Type::I64`].
     DateTime(i64),
+    /// UTF-8 text with framing supplied by [`crate::Type::String`].
+    ///
+    /// Borrowed text points into the input document, not its schema.
     String(Cow<'de, str>),
+    /// Raw Byte Data with framing supplied by [`crate::Type::Bytes`].
+    ///
+    /// This is distinct from a [`Self::List`] containing [`Self::U8`] elements.
     Bytes(Cow<'de, [u8]>),
+    /// Homogeneous elements matching the schema's List element type.
+    ///
+    /// The schema, rather than the first element, defines an empty List's type.
+    /// Original chunk boundaries are not retained in the materialized vector.
     List(Vec<Value<'de>>),
+    /// Key/value pairs in wire order, preserving duplicate keys.
+    ///
+    /// All keys share the schema's key type; all values share its value type.
+    /// Unlike a Rust map collection, this vector imposes no key uniqueness rule.
     Map(Vec<(Value<'de>, Value<'de>)>),
+    /// Positional values matching each Tuple type in order and in number.
+    ///
+    /// A document Tuple must contain at least one element.
     Tuple(Vec<Value<'de>>),
+    /// Field values in the order of the schema's nonempty Object field list.
+    ///
+    /// Names are stored only in the schema. Every schema field needs one value;
+    /// the vector cannot omit fields or supply its own field names.
     Object(Vec<Value<'de>>),
     /// An enumeration variant selected by its index in the schema.
     ///
     /// The variant names belong to the schema; the payload shape must match
     /// the selected [`Variant`](crate::Variant).
     Enumeration {
-        /// The variant's position in the schema's variant list.
+        /// The zero-based position in the schema's variant list, not a Rust
+        /// discriminant or a variant-form tag.
         index: u32,
         /// The variant's unit, newtype, tuple, or struct payload.
         payload: VariantValue<'de>,
@@ -49,16 +113,38 @@ pub enum Value<'de> {
 
 /// The payload carried by an enumeration variant.
 ///
-/// Each shape corresponds to the [`Variant`](crate::Variant) of the same name.
+/// Each shape corresponds to the [`Variant`](crate::Variant) of the same name
+/// and is checked when writing a [`Value::Enumeration`]. Shapes are not
+/// interchangeable: a one-value newtype is not a one-element tuple, and a struct
+/// payload is not an Object wrapped in a newtype.
+///
+/// # Examples
+///
+/// ```
+/// use asonb::{DocumentSchema, Type, Value, Variant, VariantValue};
+///
+/// let schema = DocumentSchema::new(Type::Enum("Status".into(), vec![
+///     Variant::Unit("Idle".into()),
+///     Variant::Newtype("Count".into(), Type::U32),
+/// ]));
+/// let value = Value::Enumeration {
+///     index: 1,
+///     payload: VariantValue::Newtype(Box::new(Value::U32(3))),
+/// };
+/// let mut bytes = Vec::new();
+/// asonb::ser_value_to_writer(&schema, &value, &mut bytes)?;
+/// assert_eq!(asonb::de_value_from_slice(&bytes)?.1, value);
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum VariantValue<'de> {
     /// A variant without a payload.
     Unit,
-    /// A variant with one value.
+    /// A variant with exactly one value matching its newtype payload schema.
     Newtype(Box<Value<'de>>),
-    /// A variant with positional values, in schema order.
+    /// At least two positional values matching the variant's types in order.
     Tuple(Vec<Value<'de>>),
-    /// A variant with named fields, whose values are in schema order.
+    /// A nonempty set of field values in schema order; names are in the schema.
     Struct(Vec<Value<'de>>),
 }
 

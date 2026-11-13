@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "asonb"
-version = "4.0.0"
+version = "4.1.0"
 dependencies = [
  "asonb-derive",
  "chrono",

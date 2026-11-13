@@ -29,7 +29,7 @@
 //! # Choosing an API
 //!
 //! Use [`ser_to_bytes`] or [`ser_to_writer`] for ordinary Serde values. Derive
-//! [`Schema`] alongside Serde's traits for named structs and enumerations:
+//! [`derive@Schema`] alongside Serde's traits for named structs and enumerations:
 //!
 //! ```
 //! #[derive(serde::Serialize, serde::Deserialize, asonb::Schema)]
@@ -42,6 +42,16 @@
 //! assert_eq!(decoded.sensor_id, 7);
 //! # Ok::<(), asonb::AsonbError>(())
 //! ```
+//!
+//! | Task | API | Result |
+//! | --- | --- | --- |
+//! | Encode a Rust value | [`ser_to_bytes`], [`ser_to_writer`] | One complete document |
+//! | Decode a Rust value | [`de_from_slice`], [`de_from_reader`] | One compatible Serde value |
+//! | Choose wire types and framing | [`ser_value_to_writer`] | A document described by a caller-supplied schema |
+//! | Inspect a complete document | [`de_value_from_slice`], [`de_value_from_reader`] | Its schema and a [`Value`] tree |
+//! | Produce or consume an incremental List | [`list_stream_writer`], [`list_stream_reader`] | A MultiChunk root List |
+//! | Stream a successful List or return a business error | [`result_stream_writer`], [`result_stream_reader`] | A root `Result` enumeration |
+//! | Inspect a document with optional List streaming | [`value_document_reader`] | Owned dynamic values and schema access |
 //!
 //! Each document contains a header, a complete [`DocumentSchema`], and a root
 //! payload. The schema describes types rather than instances: empty Lists still
@@ -60,6 +70,10 @@
 //! [`value_document_reader`] makes the same List/non-List distinction while
 //! returning dynamic values rather than a predetermined Rust type; it also
 //! streams the MultiChunk List inside a root `Result::Ok`.
+//! Dropping a stream does not finish writing or drain unread input. Consume
+//! readers to exhaustion to detect malformed tails and missing nested markers.
+//! To read consecutive explicitly terminated streams, pass `&mut reader` and
+//! keep using that same reader after the iterator has been consumed or dropped.
 //!
 //! Use [`Value`] with [`DocumentSchema`] when the application must choose Long
 //! or MultiChunk framing explicitly or inspect data without a Rust model.
@@ -75,16 +89,44 @@
 //! Adapters and handwritten Serde implementations must agree with their schema;
 //! custom field encodings can supply `#[asonb(schema_with = "path")]`.
 //!
+//! # Schema and Serde Compatibility
+//!
+//! [`Schema`] describes the serialization representation, not a Rust memory
+//! layout. The derive understands serialization-side Serde renames, static
+//! skips, named transparent wrappers, and the adapters above. Custom field
+//! adapters need a schema override. Unsupported layouts, including conditional
+//! skips (`skip_serializing_if`), `flatten`, and tagged or untagged enums, are
+//! rejected.
+//! See [`derive@Schema`] and [`Schema::schema`] for the customization contract.
+//!
+//! Decoding requires compatible wire types, not the original Rust type or its
+//! [`Schema`] implementation. Numeric widths are not widened or narrowed.
+//! Object fields and enumeration variants are matched by the names stored in
+//! the document, so their Rust declaration order may differ. Serde controls
+//! missing-field defaults and unknown-field policy; ignored fields are still
+//! parsed and validated.
+//!
+//! Standalone unit values, empty Tuples or Objects, and ordinary unit, newtype,
+//! or tuple structs have no supported mapping. Unit enumeration variants are
+//! supported. A named `#[serde(transparent)]` wrapper can instead use its single
+//! serialized field's representation. Deriving [`Schema`] does not implement
+//! Serde's traits or make an otherwise unsupported Serde operation valid.
+//!
 //! # Errors and Resource Policy
 //!
 //! Schemas and values have no library-imposed depth, size, count, or buffer
 //! quota. Recursive Rust schemas and cyclic document schema references are
-//! rejected. Platform capacity, allocation failures, and wire framing are still
-//! checked. Applications must provide their own policy for untrusted documents.
-//! Single-document readers check EOF and can block on live sources; list
-//! streaming stops at its marker.
+//! rejected. Wire lengths and platform capacity are checked, but normal Rust
+//! allocation and stack limits still apply. Applications must provide their own
+//! resource policy for untrusted documents.
+//! Single-document readers check EOF and can block on live sources. Typed List
+//! and Result streaming stop at their payload boundary without checking EOF.
+//! The dynamic reader does so only in streaming mode; other roots, including
+//! `Result::Err`, are fully materialized and EOF-checked during construction.
 //! This crate does not implement ASON text conversion or graph/pointer identity.
-//! Read failures use [`AsonbError`] and include a byte offset when one is known.
+//! Failures use [`AsonbError`]; read errors include a byte offset when one is
+//! known. A business error returned as [`ResultStreamReader::Err`] is a decoded
+//! value, not a malformed-document or I/O error.
 //! Write failures can leave partial output, so discard or otherwise handle that
 //! output rather than assuming a failed write was rolled back.
 

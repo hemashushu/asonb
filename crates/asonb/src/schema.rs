@@ -23,6 +23,14 @@ use crate::{
 /// Container children describe every possible element or variant, even when a
 /// particular value is empty. [`Type::Reference`] reuses a definition from the
 /// enclosing [`DocumentSchema`]; it does not represent a shared value or pointer.
+/// Definitions are data, not validated constructors: assemble a
+/// [`DocumentSchema`] and call [`DocumentSchema::validate`] before relying on
+/// names, reference indices, or container arities. Public document readers and
+/// writers perform this validation automatically.
+///
+/// Numeric classes are exact wire types, not conversion requests. A
+/// [`crate::Value::I32`] cannot be written with an `I64` schema, even if its value
+/// would fit. All multibyte scalar payloads, counts, and indices are little-endian.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     /// A signed 8-bit integer.
@@ -41,15 +49,19 @@ pub enum Type {
     U32,
     /// An unsigned 64-bit little-endian integer.
     U64,
-    /// An IEEE 754 single-precision value; writers normalize NaN payload bits.
+    /// An IEEE 754 single-precision value; writers use `0x7fc00000` for NaN.
     F32,
-    /// An IEEE 754 double-precision value; writers normalize NaN payload bits.
+    /// An IEEE 754 double-precision value; writers use `0x7ff8000000000000` for NaN.
     F64,
     /// A one-byte Boolean: writers use zero/one; readers treat nonzero as true.
     Bool,
     /// A Unicode scalar value stored as a little-endian u32.
     Char,
-    /// Signed whole seconds since the Unix epoch, with no stored UTC offset.
+    /// An eight-byte signed count of whole seconds since the Unix epoch.
+    ///
+    /// The original UTC offset and fractional seconds are not stored. Dynamic
+    /// values support the full `i64` range; the [`crate::date_time`] adapter also
+    /// checks that a decoded timestamp fits chrono.
     DateTime,
     /// UTF-8 text with the selected length or chunk framing.
     String(
@@ -69,6 +81,9 @@ pub enum Type {
         Box<Type>,
     ),
     /// A sequence of key/value pairs; keys and values each have one fixed type.
+    ///
+    /// The schema does not require sorted or unique keys. Maps have a single
+    /// count prefix and do not support MultiChunk framing.
     Map(
         /// Whether the pair count uses u64 (`true`) instead of u32 (`false`).
         bool,
@@ -78,16 +93,23 @@ pub enum Type {
         Box<Type>,
     ),
     /// A nonempty sequence with a separate type for each position.
+    ///
+    /// Payload values have no count prefix: the schema fixes the arity.
     Tuple(
         /// Element types, in payload order.
         Vec<Type>,
     ),
     /// A nonempty set of named fields; values follow schema order on the wire.
+    ///
+    /// Names occur only in the schema, not before each payload field.
     Object(
         /// Field names and types, in payload order.
         Vec<Field>,
     ),
     /// A named choice among unit, newtype, tuple, or struct variants.
+    ///
+    /// A value stores a `u32` variant index followed by that variant's payload.
+    /// Enumeration and variant names must satisfy [`DocumentSchema::validate`].
     Enum(
         /// The ASON identifier naming this enumeration.
         String,
@@ -95,30 +117,58 @@ pub enum Type {
         Vec<Variant>,
     ),
     /// A zero-based index into the enclosing document's reference table.
+    ///
+    /// Definitions may be reused, but missing entries and cycles are invalid.
     Reference(
         /// The referenced definition's index, not a byte offset.
         u32,
     ),
 }
 
-/// Forms of Strings, Byte Data, and List.
+/// Length and chunk framing for Strings, Byte Data, and Lists.
+///
+/// Lengths count UTF-8 bytes for Strings, raw bytes for Byte Data, and elements
+/// for Lists; they never include the prefix itself. All prefixes are
+/// little-endian. This choice changes framing, not the logical value or its
+/// element type. Ordinary Serde mappings use [`Self::Regular`]; select another
+/// form with a dynamic [`Type`] or a custom [`Schema`] implementation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Encoding {
-    /// One u32 length followed by the entire payload.
+    /// One `u32` length followed by the entire payload, including a zero length
+    /// for an empty value. Counts greater than `u32::MAX` cannot use this form.
     Regular,
-    /// One u64 length followed by the entire payload.
+    /// One `u64` length followed by the entire payload.
+    ///
+    /// A wide wire count does not guarantee that the value fits in memory on
+    /// the reading platform.
     Long,
-    /// Repeated u32 chunk lengths and payloads, normally ended by a zero length.
-    /// At the document root, EOF between chunks can also end the value.
+    /// Repeated nonzero `u32` chunk lengths and their payloads, then a zero count.
+    ///
+    /// At the document root, EOF between chunks can also end the value. Nested
+    /// values, including the List inside `Result::Ok`, require the zero marker.
+    /// EOF inside a count or payload is always truncation. Each String chunk
+    /// must be independently valid UTF-8; a character cannot span chunks.
+    ///
+    /// Dynamic readers concatenate chunks and discard their original
+    /// boundaries. The List streaming APIs instead yield individual elements.
     MultiChunk,
 }
 
-/// Object field description.
+/// A named field of an Object or an object-like enumeration variant.
+///
+/// Field order determines payload order. Names must be unique within that
+/// Object or variant, valid ASON identifiers, and not reserved ASON keywords;
+/// see [`DocumentSchema::validate`]. Creating or editing a field does not run
+/// these checks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Field {
-    /// The field's wire name, after any Serde rename has been applied.
+    /// The field's wire name, after any serialization-side Serde rename.
+    ///
+    /// This name is stored in the schema and used for named-field decoding.
     pub name: String,
     /// The schema used to read or write the field's value.
+    ///
+    /// References are resolved through the enclosing [`DocumentSchema`].
     pub ty: Type,
 }
 
@@ -126,7 +176,11 @@ impl Field {
     /// Creates a field description without validating it yet.
     ///
     /// `name` becomes the owned wire name; `ty` describes the field's payload.
-    /// [`DocumentSchema::validate`] checks identifier syntax and duplicate names.
+    /// [`DocumentSchema::validate`] checks identifier syntax, reserved keywords,
+    /// duplicate names in the enclosing field list, and the payload type.
+    /// This constructor does not fail for an invalid name or type.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let field = asonb::Field::new("count", asonb::Type::U32);
@@ -140,16 +194,27 @@ impl Field {
     }
 }
 
-/// The four enumeration payload forms. Their wire form tags are 0, 1, 2, 4.
+/// A named enumeration variant and the shape of its payload.
+///
+/// The schema uses form tags `0`, `1`, `2`, and `4` for unit, newtype, tuple,
+/// and struct variants, respectively. These tags describe the schema; a value
+/// instead selects a variant by its position in [`Type::Enum`]'s variant list.
+/// Names must be unique within the enumeration and pass
+/// [`DocumentSchema::validate`]. Variant order need not match a Rust enum's
+/// declaration order because Serde variants are matched by wire name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Variant {
     /// A variant with no payload.
+    ///
+    /// Only the variant index is written in the value area.
     Unit(
         /// The variant's wire name.
         String,
     ),
 
     /// A variant with a single payload.
+    ///
+    /// Unlike ordinary Rust newtype structs, newtype enum variants are supported.
     Newtype(
         /// The variant's wire name.
         String,
@@ -158,6 +223,8 @@ pub enum Variant {
     ),
 
     /// A variant with a tuple payload.
+    ///
+    /// Its fixed arity comes from the schema; no count prefix is written.
     Tuple(
         /// The variant's wire name.
         String,
@@ -166,6 +233,9 @@ pub enum Variant {
     ),
 
     /// A variant with a struct payload.
+    ///
+    /// As with an Object, names are stored in the schema and values follow
+    /// field order.
     Struct(
         /// The variant's wire name.
         String,
@@ -178,6 +248,8 @@ impl Variant {
     /// Borrows the wire name, regardless of the variant's payload shape.
     ///
     /// This does not resolve a reference or allocate a new string.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let variant = asonb::Variant::Newtype("Count".into(), asonb::Type::U32);
@@ -193,13 +265,27 @@ impl Variant {
     }
 }
 
-/// A complete document schema. Reference indices are local to this table.
+/// The complete type metadata stored before a document's root payload.
+///
+/// A schema contains the root type and every reusable definition it references.
+/// Reference indices are local to this table; copying a referenced [`Type`] into
+/// a different schema without its definitions can change or invalidate it.
+/// References share type descriptions, never object identity or payload storage.
+///
+/// Use [`Self::of`] to derive and validate metadata from a Rust type, or
+/// [`Self::new`] and the public fields to assemble it manually. Construction and
+/// field mutation do not validate anything; call [`Self::validate`] to check a
+/// manually assembled schema. Public document I/O validates schemas as well.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocumentSchema {
-    /// Reference types used in this schema.
+    /// Reusable definitions indexed by [`Type::Reference`].
+    ///
+    /// Entries may themselves contain references. All entries, including unused
+    /// ones, must be valid and acyclic. Reordering entries requires updating
+    /// every affected reference index.
     pub references: Vec<Type>,
 
-    /// The root value type of the document.
+    /// The type of the single root value, possibly a reference into this table.
     pub root: Type,
 }
 
@@ -208,6 +294,8 @@ impl DocumentSchema {
     ///
     /// No validation happens here. If `root` contains references, fill in
     /// [`Self::references`] before validating or writing the document.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let schema = asonb::DocumentSchema::new(asonb::Type::I32);
@@ -225,7 +313,19 @@ impl DocumentSchema {
     ///
     /// No value is needed: element types and all enum variants come from
     /// [`Schema`]. Repeated compound definitions share reference entries.
-    /// Recursive Rust types and invalid type descriptions return an error.
+    /// The returned root can therefore be a [`Type::Reference`] rather than an
+    /// inline compound definition. Each call uses a fresh [`SchemaBuilder`].
+    /// This checks the schema, not whether a future Serde value will follow it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for recursive Rust schemas, errors reported by custom
+    /// [`Schema`] implementations, an unrepresentable reference index, or any
+    /// invalid definition rejected by [`Self::validate`]. An invalid unselected
+    /// enum branch or an unsupported element type in an empty collection still
+    /// causes an error.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let schema = asonb::DocumentSchema::of::<Vec<i32>>()?;
@@ -246,12 +346,31 @@ impl DocumentSchema {
 
     /// Checks the root and every reference entry, including unused definitions.
     ///
-    /// Rejects missing or cyclic references, invalid field/enum identifiers,
-    /// reserved ASON tokens used as field names, redefinitions of the predefined
-    /// `Option` and `Result` enumerations, duplicate field/variant names, and
-    /// invalid container arities. Successful
-    /// validation does not impose a resource quota or prove that a later value
-    /// matches the schema. There are no arguments; the schema is left unchanged.
+    /// Leaves the schema unchanged. Validation does not impose a size or nesting
+    /// quota, check a value's compatibility, or ensure that every declared
+    /// count will fit the wire framing when a value is eventually written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any of the following rules is violated:
+    ///
+    /// - References must exist and form an acyclic graph, even in unused entries.
+    /// - Field, enumeration, and variant names must be valid ASON identifiers.
+    ///   These are not restricted to Rust's identifier rules.
+    /// - The exact names `true`, `false`, `NaN`, `NaN_f32`, `NaN_f64`, `Inf`,
+    ///   `Inf_f32`, and `Inf_f64` are reserved keywords. `Some`, `None`, `Ok`,
+    ///   and `Err` remain ordinary identifiers.
+    /// - Field names within an Object or struct variant and variant names within
+    ///   an enumeration must be unique.
+    /// - Tuples and Objects must be nonempty; tuple-like variants need at least
+    ///   two elements and struct-like variants need at least one field.
+    /// - An enumeration named `Option` must have exactly unit `None` and newtype
+    ///   `Some(T)` variants. One named `Result` must have exactly newtype `Ok(T)`
+    ///   and `Err(E)` variants. Their payload types and variant order may vary.
+    ///
+    /// A reference-table index that cannot fit a `u32` also returns an error.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let schema = asonb::DocumentSchema::new(asonb::Type::Reference(0));
@@ -316,6 +435,11 @@ impl DocumentSchema {
                         "Enumeration name must be a valid ASON identifier.".into(),
                     ));
                 }
+                if RESERVED_KEYWORDS.contains(&name.as_str()) {
+                    return Err(AsonbError::Message(format!(
+                        "Enumeration name \"{name}\" is reserved by ASON."
+                    )));
+                }
                 let mut names = HashSet::new();
                 let mut children = Vec::new();
                 for variant in variants {
@@ -323,6 +447,12 @@ impl DocumentSchema {
                         return Err(AsonbError::Message(
                             "Variant name must be a valid ASON identifier.".into(),
                         ));
+                    }
+                    if RESERVED_KEYWORDS.contains(&variant.name()) {
+                        return Err(AsonbError::Message(format!(
+                            "Variant name \"{}\" is reserved by ASON.",
+                            variant.name()
+                        )));
                     }
                     if !names.insert(variant.name()) {
                         return Err(AsonbError::Message("Duplicate variant name.".into()));
@@ -413,7 +543,7 @@ fn validate_fields(fields: &[Field]) -> Result<(), AsonbError> {
                 "Field name must be a valid ASON identifier.".into(),
             ));
         }
-        if RESERVED_OBJECT_KEYS.contains(&field.name.as_str()) {
+        if RESERVED_KEYWORDS.contains(&field.name.as_str()) {
             return Err(AsonbError::Message(format!(
                 "Field name \"{}\" is reserved by ASON.",
                 field.name
@@ -426,12 +556,12 @@ fn validate_fields(fields: &[Field]) -> Result<(), AsonbError> {
     Ok(())
 }
 
-/// Identifier-shaped ASON tokens that cannot be Object keys: the Boolean
-/// keywords, unsigned special floating-point literals, and the variant
-/// shorthands of the predefined `Option` and `Result` enumerations.
-const RESERVED_OBJECT_KEYS: [&str; 12] = [
-    "true", "false", "NaN", "NaN_f32", "NaN_f64", "Inf", "Inf_f32", "Inf_f64", "Some", "None",
-    "Ok", "Err",
+/// Identifier-shaped ASON keywords that cannot be Object keys, Enumeration
+/// names, or variant names: the Boolean keywords and the unsigned special
+/// floating-point literals. The variant shorthands `Some`, `None`, `Ok`, and
+/// `Err` are ordinary identifiers.
+const RESERVED_KEYWORDS: [&str; 8] = [
+    "true", "false", "NaN", "NaN_f32", "NaN_f64", "Inf", "Inf_f32", "Inf_f64",
 ];
 
 /// Enforces ASON's fixed definitions of the predefined `Option` and `Result`.
@@ -690,12 +820,84 @@ fn read_type<'de>(input: &mut impl Input<'de>) -> Result<Type, AsonbError> {
 /// Implementations must describe the actual Serde representation, not merely
 /// the fields' Rust types. Use the supplied builder for child types so reference
 /// reuse and recursive-type detection remain effective.
+///
+/// # Built-in Mappings
+///
+/// | Rust type | Wire representation |
+/// | --- | --- |
+/// | Fixed-width integers, `f32`, `f64`, `bool`, `char` | The corresponding scalar class |
+/// | `isize`, `usize` | `I64`, `U64`, regardless of platform pointer width |
+/// | `str`, `String` | Regular String |
+/// | `serde_bytes::Bytes`, `serde_bytes::ByteBuf` | Regular Byte Data |
+/// | `[T]`, `Vec<T>` | Regular List of `T` |
+/// | `[T; N]` | A Tuple with `N` positions, unless the array field adapter is used |
+/// | Rust tuples of 1 through 16 elements | Positional Tuple |
+/// | `HashMap<K, V, S>`, `BTreeMap<K, V>` | Regular Map |
+/// | `Option<T>`, `Result<T, E>` | The predefined enumeration, including every branch |
+/// | `&T`, `Box<T>`, `Cow<'_, T>` | The wrapped type's representation |
+/// | [`crate::date_time::DateTime`] | Binary DateTime |
+///
+/// A trait implementation alone does not guarantee a valid document schema.
+/// For example, `()` and `[T; 0]` produce empty Tuples, which
+/// [`DocumentSchema::of`] rejects. Unit enum variants and empty Lists are valid.
+///
+/// # Custom Representations
+///
+/// The schema must be independent of any particular value, including collection
+/// contents and the selected enumeration branch. For derived named structs and
+/// enums, recognized Serde adapters select their wire schemas automatically;
+/// other field adapters require `#[asonb(schema_with = "path")]`. The function
+/// at `path` takes `&mut SchemaBuilder` and returns `Result<Type, AsonbError>`.
+/// See the [`derive@crate::Schema`] macro for supported attributes and forms.
+///
+/// ```
+/// fn flag_schema(_: &mut asonb::SchemaBuilder)
+///     -> Result<asonb::Type, asonb::AsonbError>
+/// {
+///     Ok(asonb::Type::U8)
+/// }
+///
+/// fn serialize_flag<S: serde::Serializer>(value: &bool, serializer: S)
+///     -> Result<S::Ok, S::Error>
+/// {
+///     serializer.serialize_u8(u8::from(*value))
+/// }
+///
+/// #[derive(serde::Serialize, asonb::Schema)]
+/// struct Flags {
+///     #[serde(serialize_with = "serialize_flag")]
+///     #[asonb(schema_with = "flag_schema")]
+///     enabled: bool,
+/// }
+///
+/// let bytes = asonb::ser_to_bytes(&Flags { enabled: true })?;
+/// assert_eq!(
+///     asonb::de_value_from_slice(&bytes)?.1,
+///     asonb::Value::Object(vec![asonb::Value::U8(1)]),
+/// );
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
+///
+/// Implementing this trait does not implement `Serialize` or `Deserialize`,
+/// nor can it make an unsupported Serde operation valid.
 pub trait Schema {
     /// Describes this type using `builder` to obtain any child schemas.
     ///
-    /// Return an error if the representation cannot be described by ASONB.
+    /// `builder` is shared with the enclosing document; use
+    /// [`SchemaBuilder::build`] for every child Rust type. The returned type can
+    /// contain references created by that builder and is not necessarily a
+    /// standalone schema. Do not retain it for use with another builder.
+    ///
     /// Call [`SchemaBuilder::build`] rather than this method directly when
     /// assembling a document: `build` adds caching and recursion checks.
+    ///
+    /// # Errors
+    ///
+    /// Implementations should return an error when the representation cannot
+    /// be described by ASONB and propagate failures from child schemas.
+    /// [`DocumentSchema::of`] additionally validates the completed description.
+    ///
+    /// # Examples
     ///
     /// ```
     /// struct UserId(u64);
@@ -713,7 +915,17 @@ pub trait Schema {
     fn schema(builder: &mut SchemaBuilder) -> Result<Type, AsonbError>;
 }
 
-/// Builds deterministic reusable type definitions and rejects Rust recursion.
+/// Shared state for constructing a value-independent document schema.
+///
+/// [`Default::default`] creates an empty builder. [`Self::build`] caches results
+/// by Rust type and deduplicates structurally identical Object, Tuple, and Enum
+/// definitions into a private reference table, in first-completed order.
+/// Re-entering a Rust type that is still being expanded is rejected as recursion.
+///
+/// This type is primarily for [`Schema`] implementations and field schema
+/// overrides. Its returned references belong to this builder, and the reference
+/// table is not publicly extractable. Use [`DocumentSchema::of`] when you need
+/// a complete schema suitable for document I/O.
 #[derive(Default)]
 pub struct SchemaBuilder {
     /// Compound definitions in first-completed order, used by Reference indices.
@@ -731,7 +943,16 @@ impl SchemaBuilder {
     /// Compound types are placed in this builder's private reference table, so
     /// a returned [`Type::Reference`] is meaningful only with that table. Use
     /// [`DocumentSchema::of`] when you need a standalone, complete schema.
-    /// Recursion and errors from `T`'s [`Schema`] implementation are returned.
+    /// This method does not perform [`DocumentSchema::validate`]; validation
+    /// happens after the complete document schema has been assembled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for recursive expansion of `T`, errors from `T`'s
+    /// [`Schema`] implementation or its children, or too many reusable
+    /// definitions to index with a `u32`.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let mut builder = asonb::SchemaBuilder::default();
@@ -1291,11 +1512,11 @@ mod tests {
     }
 
     #[test]
-    /// Rejects ASON reserved tokens as Object and object-like variant keys.
+    /// Rejects ASON keywords as Object keys, object-like variant keys,
+    /// enumeration names, and variant names.
     fn test_reserved_object_keys() {
         for key in [
-            "true", "false", "NaN", "NaN_f32", "NaN_f64", "Inf", "Inf_f32", "Inf_f64", "Some",
-            "None", "Ok", "Err",
+            "true", "false", "NaN", "NaN_f32", "NaN_f64", "Inf", "Inf_f32", "Inf_f64",
         ] {
             let expected = format!("Field name \"{key}\" is reserved by ASON.");
             for ty in [
@@ -1313,11 +1534,26 @@ mod tests {
                     "accepted reserved key {key}"
                 );
             }
+
+            let enumeration = Type::Enum(key.into(), vec![Variant::Unit("A".into())]);
+            let expected = format!("Enumeration name \"{key}\" is reserved by ASON.");
+            assert!(
+                matches!(DocumentSchema::new(enumeration).validate(), Err(AsonbError::Message(message)) if message == expected),
+                "accepted reserved enumeration name {key}"
+            );
+
+            let variant = Type::Enum("E".into(), vec![Variant::Unit(key.into())]);
+            let expected = format!("Variant name \"{key}\" is reserved by ASON.");
+            assert!(
+                matches!(DocumentSchema::new(variant).validate(), Err(AsonbError::Message(message)) if message == expected),
+                "accepted reserved variant name {key}"
+            );
         }
 
-        // Only exact spellings are reserved; enumeration and variant names are unaffected.
+        // Only exact spellings are reserved, and the variant shorthands are ordinary identifiers.
         for key in [
-            "some", "NONE", "ok", "ERR", "True", "nan", "Inf_i32", "Some_",
+            "some", "NONE", "ok", "ERR", "True", "nan", "Inf_i32", "Some_", "Some", "None", "Ok",
+            "Err",
         ] {
             DocumentSchema::new(Type::Object(vec![Field::new(key, Type::I32)]))
                 .validate()

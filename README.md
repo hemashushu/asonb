@@ -431,7 +431,7 @@ Ordinary Serde readers can decode documents produced by the Result stream writer
 
 ### 3.3 Rust Type Mappings
 
-Primitive types retain their widths. `usize` and `isize` use `u64` and `i64`, respectively, following Serde's mapping. `Vec<T>` and slices use Lists; Rust arrays and tuples use Tuples. Named structs use Objects, and enums use the four Enumeration payload forms. `Option<T>` and `Result<T, E>` map to ASON's [predefined Enumerations](#4311-enumerations) `Option` and `Result`, retaining their variant names. A user-defined enum named (or renamed to) `Option` or `Result` is rejected unless it matches the predefined definition, and Object fields cannot be named (or renamed to) reserved ASON tokens such as `Some` or `true`; see [Type Definitions](#42-type-definitions). Ownership wrappers such as `Box<T>` serialize their contents, not pointer identities.
+Primitive types retain their widths. `usize` and `isize` use `u64` and `i64`, respectively, following Serde's mapping. `Vec<T>` and slices use Lists; Rust arrays and tuples use Tuples. Named structs use Objects, and enums use the four Enumeration payload forms. `Option<T>` and `Result<T, E>` map to ASON's [predefined Enumerations](#4311-enumerations) `Option` and `Result`, retaining their variant names. A user-defined enum named (or renamed to) `Option` or `Result` is rejected unless it matches the predefined definition, and Object fields, enums, and variants cannot be named (or renamed to) reserved ASON keywords such as `true` or `NaN`; see [Type Definitions](#42-type-definitions). Ownership wrappers such as `Box<T>` serialize their contents, not pointer identities.
 
 The following Rust types are not supported:
 
@@ -535,7 +535,7 @@ To align with ASON, the following constraints apply:
 
 - A Tuple must contain at least one element.
 - An ASONB Object schema must contain at least one field, and its field names must be unique. ASON's `{}` text form is a shorthand for omitting fields with defaults in the target type; it does not represent an empty Object. ASONB object-like variant schemas must also contain at least one field, though ASON text can omit their defaulted fields in the same way.
-- Object field names, including those of object-like variants, must not be ASON reserved tokens: the Boolean keywords `true` and `false`, the special floating-point literals `NaN`, `NaN_f32`, `NaN_f64`, `Inf`, `Inf_f32`, and `Inf_f64`, and the predefined variant names `Some`, `None`, `Ok`, and `Err`. Matching is case-sensitive, so `some` or `NONE` are ordinary identifiers. Enumeration and variant names are not restricted by this rule.
+- Object field names (including those of object-like variants), Enumeration names, and variant names must not be ASON reserved keywords: the Boolean keywords `true` and `false` and the special floating-point literals `NaN`, `NaN_f32`, `NaN_f64`, `Inf`, `Inf_f32`, and `Inf_f64`. Matching is case-sensitive, so `True` or `nan` are ordinary identifiers. The predefined variant names `Some`, `None`, `Ok`, and `Err` are not reserved and can be used as field, Enumeration, and variant names.
 - A tuple-like variant must contain at least two elements. Zero-element and one-element tuple-like variants are invalid; in textual ASON, the one-element form conflicts with a single-value variant. A single-value variant may itself contain a nonempty Tuple.
 - The Enumerations `Option` and `Result` are predefined by ASON and cannot be redefined. See [Enumerations](#4311-enumerations) for details.
 - ASON Maps are ordered sequences of key-value pairs, and the ASON specification does not impose a uniqueness constraint on Map keys. ASONB preserves the pairs in sequence and leaves duplicate-key handling to applications. Duplicate Object field names are rejected by schema validation.
@@ -1124,7 +1124,7 @@ Two Enumerations are predefined by ASON, and ASONB schemas must follow their def
 
 An Enumeration named `Option` or `Result` must contain exactly these two variants, with exactly these names and payload forms; adding, removing, or renaming a variant, or changing its payload form (for example, a unit `Ok` or a tuple-like `Some`), is invalid. The payload types are free, and so is the variant order, since variants are matched by name. Names are case-sensitive: `option` or `RESULT` names an ordinary user-defined Enumeration, while a variant named `some` does not satisfy `Option`. Like other structural constraints, this applies to unused reference definitions and is checked by both writers and readers.
 
-ASON text also accepts the shorthand forms `Some(value)`, `None`, `Ok(value)`, and `Err(error)`. ASONB has no shorthand encoding: these values always use the fully qualified `Option` and `Result` Enumeration schemas described here. The shorthand names are reserved and cannot be used as Object field names (see [Type Definitions](#42-type-definitions)).
+ASON text also accepts the shorthand forms `Some(value)`, `None`, `Ok(value)`, and `Err(error)`. ASONB has no shorthand encoding: these values always use the fully qualified `Option` and `Result` Enumeration schemas described here. The shorthand names are not reserved and can be used as Object field names (see [Type Definitions](#42-type-definitions)).
 
 For example, `Option` has two variants: `None` with no payload and `Some` with one `i32` payload. Its type definition is:
 

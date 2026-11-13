@@ -283,16 +283,32 @@ fn test_predefined_enumerations_and_reserved_keys() {
         Err(String),
     }
     #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
-    /// An Object whose key is an ASON variant shorthand.
+    /// An Object whose key is an ASON keyword.
     struct Reserved {
-        #[serde(rename = "None")]
-        /// Renamed to a reserved token.
-        none: i32,
+        #[serde(rename = "NaN")]
+        /// Renamed to a reserved keyword.
+        nan: i32,
+    }
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    #[serde(rename = "Some")]
+    /// Variant shorthand names are ordinary identifiers.
+    enum Shorthand {
+        /// Field named after a variant shorthand.
+        None {
+            #[serde(rename = "Ok")]
+            /// Renamed to a variant shorthand.
+            ok: i32,
+        },
     }
     assert!(DocumentSchema::of::<Option>().is_err());
     assert!(ser_to_bytes(&Option::None).is_err());
     assert!(ser_to_bytes(&Outcome::Ok).is_err());
-    assert!(ser_to_bytes(&Reserved { none: 1 }).is_err());
+    assert!(ser_to_bytes(&Reserved { nan: 1 }).is_err());
+    let value = Shorthand::None { ok: 1 };
+    assert_eq!(
+        de_from_slice::<Shorthand>(&ser_to_bytes(&value).unwrap()).unwrap(),
+        value
+    );
 
     // Rust's Option and Result still map to the predefined enumerations, and
     // matching by name keeps either wire variant order decodable.

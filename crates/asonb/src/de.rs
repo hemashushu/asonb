@@ -29,9 +29,23 @@ use std::{borrow::Cow, io::Read, iter::FusedIterator, marker::PhantomData};
 /// `reader` must start at the header and reach EOF after the root payload. The
 /// target needs `DeserializeOwned`, not [`crate::Schema`]: the writer's schema
 /// travels with the document. Strings and bytes are owned because a general
-/// reader cannot lend stable storage. Invalid input, type mismatches, I/O errors,
-/// or trailing bytes fail the call. Checking EOF can block on a live source.
-/// No library-imposed resource quota protects against very large/deep input.
+/// reader cannot lend stable storage. The root value is fully decoded before
+/// returning; this is not an incremental iterator.
+///
+/// The reader is taken by value; pass `&mut reader` if the caller must retain
+/// it. Checking EOF can block on a live source and reads a byte past the payload
+/// if trailing data exists. Use [`list_stream_reader`] or
+/// [`result_stream_reader`] for consecutive streamed documents instead.
+/// No library-imposed resource quota protects against very large or deep input.
+///
+/// # Errors
+///
+/// Returns an error for an invalid or unsupported header, an invalid schema,
+/// malformed or truncated payloads, a target incompatible with the wire types,
+/// a custom `Deserialize` failure, an I/O failure, or trailing bytes. Failed
+/// reads do not restore the reader's original position.
+///
+/// # Examples
 ///
 /// ```
 /// let bytes = asonb::ser_to_bytes(&vec![1i32, 2])?;
@@ -49,8 +63,20 @@ pub fn de_from_reader<T: de::DeserializeOwned, R: Read>(reader: R) -> Result<T, 
 /// are contiguous and can be lent directly; MultiChunk payloads are joined into
 /// owned storage and therefore cannot satisfy a borrowed `&str`/byte target.
 /// Numeric values are decoded safely without alignment assumptions. The target
-/// needs only Serde `Deserialize`; schema errors, type mismatches, malformed
-/// payloads, and trailing bytes are rejected. There are no size or depth quotas.
+/// needs only Serde `Deserialize`, not [`crate::Schema`]. Borrowing is available
+/// only when the target's `Deserialize` implementation requests it; asking for a
+/// `String` or owned byte buffer still allocates. The schema and container
+/// storage are not zero-copy. There are no size or depth quotas.
+///
+/// # Errors
+///
+/// Returns an error for an invalid header or schema, malformed or truncated
+/// payloads (including invalid UTF-8 or Unicode scalars), incompatible target
+/// types, custom deserialization failures, or bytes after the root value.
+/// A borrowed string or byte target also fails for a MultiChunk payload, even
+/// when that payload has only one chunk.
+///
+/// # Examples
 ///
 /// ```
 /// let bytes = asonb::ser_to_bytes(&"hello")?;
@@ -65,9 +91,21 @@ pub fn de_from_slice<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, As
 /// Reads one finite document into its schema and an entirely owned value tree.
 ///
 /// `reader` starts at the document header and is consumed by this call. The
-/// returned value has no borrow from the source. Invalid schemas, malformed
-/// payloads, I/O errors, and trailing bytes are rejected. The EOF check may block
-/// on a live source; use [`crate::list_stream_reader`] for pipelines instead.
+/// result is `(schema, root_value)`, with all text, bytes, and containers owned;
+/// neither a Rust model nor a [`crate::Schema`] implementation is needed.
+/// All payloads, including MultiChunk Lists, are materialized in memory.
+///
+/// The EOF check may block on a live source and is not suitable for concatenated
+/// documents. Use [`value_document_reader`] to stream supported List roots.
+/// No library-imposed resource quota limits materialization.
+///
+/// # Errors
+///
+/// Returns an error for an invalid header or schema, malformed or truncated
+/// payloads, platform-capacity or fallible buffer-allocation failures, I/O
+/// failures, or trailing bytes. Reading is not rolled back on failure.
+///
+/// # Examples
 ///
 /// ```
 /// let bytes = asonb::ser_to_bytes(&42i32)?;
@@ -85,10 +123,21 @@ pub fn de_value_from_reader(
 /// Reads one complete document, borrowing contiguous string and byte payloads.
 ///
 /// `bytes` must contain exactly one document, including its header. Returned
-/// borrows remain valid only while this slice lives. Chunked text and byte data
-/// are joined into owned storage; schemas and container vectors are also owned.
-/// Malformed input and trailing bytes return an error. Numeric values are copied
+/// `(schema, root_value)` borrows remain valid only while this slice lives.
+/// Regular and Long string/byte leaves borrow their payloads. MultiChunk text
+/// and byte data are joined into owned storage, even for a single chunk;
+/// schemas and container vectors are also owned. Numeric values are copied
 /// from little-endian bytes, never viewed through unaligned native references.
+/// This API materializes entire containers rather than iterating over them.
+///
+/// # Errors
+///
+/// Returns an error for an invalid header or schema, malformed or truncated
+/// payloads, platform-capacity or fallible buffer-allocation failures, or
+/// trailing bytes. Each String chunk must be valid UTF-8 independently.
+/// There are no library-imposed size or nesting quotas.
+///
+/// # Examples
 ///
 /// ```
 /// use std::borrow::Cow;
@@ -116,9 +165,23 @@ fn read_value_document<'de>(
 ///
 /// `reader` is taken by value; pass `&mut reader` to retain access after dropping
 /// the iterator. Construction reads and validates the header/schema, but no
-/// elements. A different root type fails immediately; element type errors occur
-/// during iteration. The iterator stops after the marker, root-boundary EOF, or
-/// its first error. It never checks for trailing bytes beyond an explicit marker.
+/// elements or chunk counts. The root may be a schema reference resolving to a
+/// MultiChunk List. `T` needs only `DeserializeOwned`, not [`crate::Schema`].
+///
+/// The iterator yields `Result<T, AsonbError>` one element at a time, independent
+/// of chunk boundaries. It stops after the marker, EOF between complete root
+/// chunks, or its first error. It never checks for trailing bytes beyond an
+/// explicit marker. Dropping it early does not drain or validate the remainder;
+/// consume it to exhaustion to check the entire List.
+///
+/// # Errors
+///
+/// Construction fails for an invalid header or schema, a root other than a
+/// MultiChunk List, or an I/O error while opening the document. Element type
+/// mismatches, malformed chunk counts, truncated payloads, and subsequent I/O
+/// errors are returned during iteration, not by this constructor.
+///
+/// # Examples
 ///
 /// ```
 /// let mut bytes = Vec::new();
@@ -160,6 +223,23 @@ pub fn list_stream_reader<T: de::DeserializeOwned, R: Read>(
 /// An Err payload is decoded in full before returning. Neither branch checks EOF
 /// or trailing bytes. Unlike a root List, the nested List requires a zero-count
 /// terminator; consume the iterator to its end to validate the complete payload.
+/// Neither target type needs [`crate::Schema`].
+///
+/// The reader is taken by value; pass `&mut reader` to continue reading a later
+/// document once this result has been consumed or dropped. A successfully
+/// decoded business error is [`ResultStreamReader::Err`], not the outer
+/// `Result::Err(AsonbError)`. Its `E` value is fully owned.
+///
+/// # Errors
+///
+/// Returns an error for an invalid header or schema, a root that is not the
+/// predefined `Result` enumeration, an invalid variant index, a selected `Ok`
+/// payload that is not a MultiChunk List, an incompatible or malformed `Err`
+/// payload, or an I/O or custom deserialization failure during construction.
+/// Successful List element errors and a missing List end marker are deferred
+/// to the returned iterator.
+///
+/// # Examples
 ///
 /// ```
 /// let mut bytes = Vec::new();
@@ -215,10 +295,27 @@ pub fn result_stream_reader<T: de::DeserializeOwned, E: de::DeserializeOwned, R:
     }
 }
 
-/// A successful List decoded incrementally, or a fully decoded business error.
+/// The decoded branch of a root `Result` opened by [`result_stream_reader`].
+///
+/// This is distinct from the constructor's outer `Result<_, AsonbError>`:
+/// these variants are application data, while the outer error reports invalid
+/// documents or I/O failures. `T` is one successful List element, `E` is the
+/// complete business-error type, and `R` is the owned or borrowed input reader.
+///
+/// Both branches stop at their payload boundary without requiring EOF, allowing
+/// a following document to remain unread. The `Ok` iterator must still be
+/// consumed to exhaustion to validate its required nested List terminator.
 pub enum ResultStreamReader<T, E, R: Read> {
-    Ok(ListStreamReader<T, R>),
-    Err(E),
+    /// A lazily decoded successful List, with errors reported per element.
+    Ok(
+        /// The open List iterator; it has not read any element yet.
+        ListStreamReader<T, R>,
+    ),
+    /// A business error decoded completely before the constructor returned.
+    Err(
+        /// The owned application error, not a document-decoding error.
+        E,
+    ),
 }
 
 /// Opens a document for dynamic inspection, streaming MultiChunk List payloads.
@@ -231,8 +328,27 @@ pub enum ResultStreamReader<T, E, R: Read> {
 /// requires an explicit end marker. Every other root, including regular Lists
 /// and `Result::Err`, is fully read and EOF-checked during construction;
 /// iteration then yields that root once. Thus construction may block on a live
-/// nonstreaming source. Errors are returned either here or, for streamed
-/// payloads, by the iterator at the point they are encountered.
+/// nonstreaming source. All yielded values are owned `Value<'static>` values;
+/// no Rust model or [`crate::Schema`] implementation is required.
+///
+/// Use [`ValueDocumentReader::schema`] and [`ValueDocumentReader::root_type`]
+/// to inspect metadata before iteration. In either streaming mode, iteration
+/// yields bare List elements, not a List or a Result wrapper.
+/// [`ValueDocumentReader::item_type`] describes those elements.
+///
+/// Pass `&mut reader` to retain the source. Only streaming modes leave bytes
+/// following an explicit terminator unread; a nonstreaming root performs an
+/// EOF check. Dropping a streaming reader early does not consume the rest.
+///
+/// # Errors
+///
+/// Construction fails for an invalid header or schema, I/O errors while
+/// opening the document, or any malformed payload or trailing bytes in
+/// nonstreaming mode. For streamed payloads, malformed chunks, truncated
+/// elements, capacity/allocation errors, and I/O failures are yielded at the
+/// point they occur; the iterator is exhausted after its first error.
+///
+/// # Examples
 ///
 /// ```
 /// let bytes = asonb::ser_to_bytes(&42i32)?;
@@ -853,9 +969,44 @@ impl<'de, I: Input<'de>> VariantAccess<'de> for VariantAccessor<'_, '_, 'de, I> 
     }
 }
 
-/// Incremental MultiChunk List reader, fused after its marker or first error.
-/// Root Lists also accept EOF between chunks; Result-wrapped Lists do not.
-/// It never probes beyond an explicit marker for a trailing document.
+/// An owned-element iterator over a MultiChunk List, without whole-List buffering.
+///
+/// Construct a root List reader with [`list_stream_reader`], or obtain the
+/// nested successful List from [`ResultStreamReader::Ok`]. Each call to
+/// [`Iterator::next`] returns one `Result<T, AsonbError>`; a chunk can contain
+/// several elements, and a single element can itself own large containers.
+///
+/// Root Lists accept EOF between chunks; Result-wrapped Lists require an
+/// explicit zero marker. The reader never probes beyond an explicit marker
+/// for a trailing document. It implements [`FusedIterator`]: after the marker,
+/// legal root EOF, or one yielded error, every subsequent call returns `None`.
+/// Errors may leave the source in the middle of a value, so reading cannot
+/// safely resume from that point.
+///
+/// `R` is retained by the iterator. Pass `&mut R` to the constructor to recover
+/// access to the source after the iterator is consumed or dropped. Dropping
+/// early performs no further reads; reading the last element alone does not
+/// validate the following chunk boundary or terminator.
+///
+/// # Examples
+///
+/// An explicit terminator preserves a following document:
+///
+/// ```
+/// let mut bytes = Vec::new();
+/// let mut stream = asonb::list_stream_writer::<u32, _>(&mut bytes);
+/// stream.start_list()?;
+/// stream.writes(&[1, 2])?;
+/// stream.end_list()?;
+/// asonb::ser_to_writer(&true, &mut bytes)?;
+///
+/// let mut source = bytes.as_slice();
+/// let values = asonb::list_stream_reader::<u32, _>(&mut source)?
+///     .collect::<Result<Vec<_>, _>>()?;
+/// assert_eq!(values, [1, 2]);
+/// assert!(asonb::de_from_reader::<bool, _>(&mut source)?);
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
 pub struct ListStreamReader<T, R: Read> {
     /// Owned reader wrapper; it consumes only bytes needed for the next item.
     input: ReaderInput<R>,
@@ -872,10 +1023,26 @@ pub struct ListStreamReader<T, R: Read> {
     marker: PhantomData<fn() -> T>,
 }
 
-/// Reads a dynamic document, streaming items for a multi-chunk root List or the
-/// multi-chunk List inside a root `Result::Ok`. Other roots are materialized
-/// during construction and yielded once. All modes return owned values and
-/// remain exhausted after the first error or end.
+/// A schema-inspecting iterator over owned dynamic document values.
+///
+/// Create this with [`value_document_reader`]. Its iteration mode depends on
+/// both the root schema and, for a `Result`, the selected branch:
+///
+/// | Document root | Yielded values | When the payload is read |
+/// | --- | --- | --- |
+/// | MultiChunk List | Each List element | During iteration |
+/// | `Result::Ok` containing a MultiChunk List | Each successful List element | During iteration |
+/// | Any other root, including `Result::Err` | One complete root value | During construction, including an EOF check |
+///
+/// Every item is `Result<Value<'static>, AsonbError>` with owned text and bytes.
+/// In streaming modes the List and Result wrappers are not yielded; inspect
+/// [`Self::root_type`] and the mode queries to distinguish them. Regular and
+/// Long Lists are materialized roots, not streaming iterators.
+///
+/// This implements [`FusedIterator`]: after the first error or the end of the
+/// selected mode, iteration remains exhausted. Metadata stays accessible after
+/// exhaustion. Dropping an unread stream does not drain it or check its tail.
+/// There is no library-imposed size or nesting quota on schemas or values.
 pub struct ValueDocumentReader<R: Read> {
     /// Source cursor, retained for lazy MultiChunk List reads.
     input: ReaderInput<R>,
@@ -899,8 +1066,11 @@ pub struct ValueDocumentReader<R: Read> {
 impl<R: Read> ValueDocumentReader<R> {
     /// Borrows the complete document schema without advancing the iterator.
     ///
-    /// There are no arguments. The returned reference lives as long as this
-    /// borrow of the reader and includes the original, possibly aliased root.
+    /// The returned reference lives as long as this borrow of the reader and
+    /// includes all reference entries and the original, possibly aliased root.
+    /// This performs no I/O and remains available after iteration is exhausted.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # let bytes = asonb::ser_to_bytes(&42i32)?;
@@ -914,8 +1084,11 @@ impl<R: Read> ValueDocumentReader<R> {
 
     /// Borrows the root type after resolving its top-level reference aliases.
     ///
-    /// There are no arguments and no bytes are read. Child references, if any,
-    /// still refer to the table available through [`Self::schema`].
+    /// No bytes are read. Child references, if any, still refer to the table
+    /// available through [`Self::schema`]. In Result streaming mode this is the
+    /// root enumeration, not the nested List or its element type.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # let bytes = asonb::ser_to_bytes(&vec![1i32])?;
@@ -929,9 +1102,12 @@ impl<R: Read> ValueDocumentReader<R> {
 
     /// Reports whether iteration yields root List elements rather than one root.
     ///
-    /// There are no arguments. Only a MultiChunk root List selects this mode;
+    /// Only a MultiChunk root List selects this mode;
     /// nested Lists and regular/long root Lists do not. This remains a mode
     /// query after exhaustion, not a check for whether more items are available.
+    /// It is always `false` when [`Self::is_streaming_result`] is `true`.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # let bytes = asonb::ser_to_bytes(&vec![1i32])?;
@@ -945,10 +1121,13 @@ impl<R: Read> ValueDocumentReader<R> {
 
     /// Reports whether iteration yields the List elements inside `Result::Ok`.
     ///
-    /// There are no arguments. Only a root `Result` whose selected `Ok` payload
+    /// Only a root `Result` whose selected `Ok` payload
     /// is a MultiChunk List selects this mode; the variant index has already
     /// been consumed. `Result::Err` and other `Ok` payloads are yielded once as
-    /// a whole [`Value::Enumeration`].
+    /// a whole [`Value::Enumeration`]. This flag remains unchanged after
+    /// exhaustion and is mutually exclusive with [`Self::is_streaming_list`].
+    ///
+    /// # Examples
     ///
     /// ```
     /// let mut bytes = Vec::new();
@@ -969,6 +1148,10 @@ impl<R: Read> ValueDocumentReader<R> {
     ///
     /// Returns `None` when the reader yields a single materialized root. The
     /// type may be a reference into the table available through [`Self::schema`].
+    /// It describes yielded elements in either streaming mode, performs no I/O,
+    /// and remains `Some` after the stream ends.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # let bytes = asonb::ser_to_bytes(&42i32)?;

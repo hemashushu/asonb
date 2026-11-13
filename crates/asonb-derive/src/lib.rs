@@ -397,16 +397,73 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 }
 
 #[proc_macro_derive(Schema, attributes(serde, asonb))]
-/// Implements the main crate's Schema trait for a struct or enumeration.
+/// Derives a value-independent `asonb::Schema` implementation.
 ///
-/// `input` is the compiler-supplied token stream for the annotated item, not a
-/// runtime value. The returned tokens contain either an implementation or a
-/// span-aware compile error. Users invoke the derive, not this function directly.
-/// The generated schema follows Serde's serialized names, skips, and recognized
-/// adapters. Custom serialization needs `#[asonb(schema_with = "path")]`.
+/// Invoke this through `#[derive(asonb::Schema)]` alongside the Serde traits
+/// needed by the application. The generated implementation describes every
+/// serialized field and variant without inspecting a runtime value; it does
+/// not implement `Serialize` or `Deserialize`.
+///
+/// # Supported Rust Forms
+///
+/// Named structs become Objects. Enumerations can have unit, newtype, tuple,
+/// and named-field variants. Named `#[serde(transparent)]` structs use their
+/// single serialized field's representation, including its adapter or schema
+/// override. Unit, newtype, and tuple structs and unions are rejected.
+///
+/// Lifetimes, const generics, and existing where clauses are preserved. A
+/// `Schema` bound is added to each generic type parameter. Successful macro
+/// expansion does not itself validate the completed schema: empty Objects,
+/// invalid ASON names, recursive types, and other invalid definitions are
+/// rejected when `DocumentSchema::of` or a writer builds the schema.
+///
+/// # Serde Attributes
+///
+/// The derive follows serialization-side `rename`, `rename_all`,
+/// `rename_all_fields`, `skip`, and `skip_serializing` settings. Fields and
+/// variants skipped for serialization are absent from the schema; skipping a
+/// variant does not permit serializing that variant later. Deserialize-only
+/// naming and default policies do not change the writer's schema.
+///
+/// Recognized field adapters are `serde_bytes`, `asonb::array`, and
+/// `asonb::date_time` (also `crate::array` and `crate::date_time` within the main
+/// crate). Other `with` or `serialize_with` paths require an explicit field
+/// schema override. Adapter paths are recognized by spelling, so aliases also
+/// need an override.
+///
+/// Conditional skips (`skip_serializing_if`), `flatten`, untagged enums, and
+/// internally or adjacently tagged enums (`tag` or `content`) are rejected
+/// during macro expansion rather than guessed from one serialized value.
+///
+/// # Custom Field Schemas
+///
+/// Add `#[asonb(schema_with = "path")]` to a field whose custom Serde encoding
+/// differs from its Rust type. The function at `path` must take
+/// `&mut asonb::SchemaBuilder` and return `Result<asonb::Type, asonb::AsonbError>`.
+/// Use the supplied builder for child types, and describe exactly the encoding
+/// emitted by the field's serializer. An override takes precedence over a
+/// recognized adapter and need not inspect or construct a field value.
+///
+/// ```text
+/// fn flag_schema(_: &mut asonb::SchemaBuilder)
+///     -> Result<asonb::Type, asonb::AsonbError>
+/// {
+///     Ok(asonb::Type::U8)
+/// }
+///
+/// #[derive(serde::Serialize, asonb::Schema)]
+/// struct Flags {
+///     #[serde(serialize_with = "serialize_flag")]
+///     #[asonb(schema_with = "flag_schema")]
+///     enabled: bool,
+/// }
+/// // serialize_flag must write a u8, not Serde's normal Boolean representation.
+/// ```
+///
+/// # Examples
 ///
 /// In a crate depending on `asonb`, use the re-exported derive as follows
-/// (this usage is also exercised by the main crate's documentation tests):
+/// (a compiling version is exercised by the main crate's documentation tests):
 ///
 /// ```text
 /// #[derive(serde::Serialize, serde::Deserialize, asonb::Schema)]

@@ -23,8 +23,23 @@ use std::{io::Write, marker::PhantomData};
 /// `value` supplies both its Serde payload and its static [`Schema`]. `writer`
 /// receives the header, schema, then payload; this function does not flush it.
 /// The schema is built and validated before any bytes are emitted, even for
-/// empty collections. Unsupported values and write failures return an error
-/// and may leave partial output. No size or nesting quota is imposed.
+/// empty collections and unselected enum branches. On success, the destination
+/// contains a complete document and can immediately receive another document.
+///
+/// Known-length containers write directly to the sink. A Serde sequence or Map
+/// without a known count buffers its own encoded payload so its count can be
+/// written first; the entire document is not buffered merely to support a
+/// forward-only destination. No size or nesting quota is imposed.
+///
+/// # Errors
+///
+/// Returns an error if schema construction or validation fails, a Serde
+/// operation or value does not match the schema, a count exceeds its selected
+/// wire width, a custom serializer fails, or the destination reports an I/O
+/// error. Schema errors occur before output begins; later errors can leave
+/// partial output, which is not rolled back.
+///
+/// # Examples
 ///
 /// ```
 /// let mut output = Vec::new();
@@ -46,7 +61,15 @@ pub fn ser_to_writer<T: Serialize + Schema + ?Sized, W: Write>(
 ///
 /// `T` must describe the same representation through [`Schema`] and Serde's
 /// `Serialize`. The returned bytes include the header and schema, not just the
-/// payload. Schema and value errors are the same as for [`ser_to_writer`].
+/// payload. The complete document is retained in memory until returned.
+///
+/// # Errors
+///
+/// Schema construction, unsupported Serde representations, mismatched payloads,
+/// and framing errors are reported as for [`ser_to_writer`]. No partial byte
+/// vector is returned on failure.
+///
+/// # Examples
 ///
 /// ```
 /// let bytes = asonb::ser_to_bytes(&42u32)?;
@@ -64,8 +87,24 @@ pub fn ser_to_bytes<T: Serialize + Schema + ?Sized>(value: &T) -> Result<Vec<u8>
 /// `schema` supplies types, field order, and framing. `value` must match it
 /// exactly; numeric widths are not coerced. `writer` receives the header, schema,
 /// and payload, but is not flushed. Invalid schemas are rejected before writing.
-/// Value mismatches and I/O failures can leave partial output: arbitrary writers
-/// cannot be rolled back. There are no library-imposed size or depth quotas.
+/// Values are checked as their payloads are emitted, not in a separate
+/// whole-value preflight pass. There are no library-imposed size or depth quotas.
+///
+/// A nonempty MultiChunk String, Byte Data, or List is emitted as one chunk
+/// followed by a zero marker; an empty one consists only of the zero marker.
+/// This API does not split a materialized value into smaller chunks, so that
+/// single chunk must fit a `u32` count. Use [`list_stream_writer`] to produce
+/// List elements in separately supplied chunks.
+///
+/// # Errors
+///
+/// Returns an error for an invalid schema, a value of the wrong wire type or
+/// container arity, an out-of-range enumeration index, a mismatched variant
+/// payload shape, a count that exceeds its framing, or an I/O failure.
+/// Value and write errors can leave partial output: arbitrary writers cannot
+/// be rolled back.
+///
+/// # Examples
 ///
 /// ```
 /// use asonb::{DocumentSchema, Encoding, Type, Value};
@@ -92,6 +131,10 @@ pub fn ser_value_to_writer(
 /// nothing and cannot fail: call [`ListStreamWriter::start_list`] to write the
 /// header and schema, then write values and explicitly end the list. Dropping
 /// the stream neither writes an end marker nor flushes the destination.
+/// Schema construction and validation are deferred until `start_list`; `T`
+/// needs `Serialize` only when elements are actually written.
+///
+/// # Examples
 ///
 /// ```
 /// let mut bytes = Vec::new();
@@ -115,9 +158,14 @@ pub fn list_stream_writer<T: Schema, W: Write>(writer: &mut W) -> ListStreamWrit
 
 /// Creates an idle writer for a Result containing a streamed List or an error.
 ///
-/// Both `T` (the List element) and `E` need Schema because the header describes
-/// both branches. Construction writes nothing. Choose one branch with `start_ok`
-/// or `write_err`; either method consumes this writer. No method flushes the sink.
+/// Both `T` (the List element) and `E` need [`Schema`] because the header describes
+/// both branches, even when one is never written. Construction writes nothing
+/// and cannot fail; schema construction is deferred until a branch is chosen.
+/// Choose [`ResultStreamWriter::start_ok`] or [`ResultStreamWriter::write_err`];
+/// either method consumes this writer. The former needs no serialized `E`,
+/// while the latter needs no serialized `T`. No method flushes the sink.
+///
+/// # Examples
 ///
 /// ```
 /// let mut bytes = Vec::new();
@@ -147,18 +195,52 @@ impl<T: Schema> Schema for StreamListSchema<T> {
     }
 }
 
-/// A forward-only Result writer with mutually exclusive, consuming branches.
+/// A forward-only writer for a root `Result` with a MultiChunk List in `Ok`.
+///
+/// Create this with [`result_stream_writer`]. The lifetime `'a` is the mutable
+/// borrow of the destination `W`; `T` describes each successful List element and
+/// `E` the business-error payload. Both types must provide valid schemas,
+/// regardless of the branch selected.
+///
+/// Branch methods consume this writer, so a document cannot switch branches:
+/// [`Self::start_ok`] returns an already-open [`ListStreamWriter`], and
+/// [`Self::write_err`] writes the entire error value. Dropping an unselected
+/// writer emits nothing. Neither branch flushes the destination.
 pub struct ResultStreamWriter<'a, W: Write, T, E> {
     writer: &'a mut W,
     marker: PhantomData<fn(&T, &E)>,
 }
 
 impl<'a, W: Write, T: Schema, E: Schema> ResultStreamWriter<'a, W, T, E> {
-    /// Writes the header, schema and Ok variant index, returning an open List.
+    /// Writes the header, complete schema, and `Ok` index, returning an open List.
     ///
-    /// Write elements directly without calling `start_list` again, then call
-    /// `end_list` to emit the required zero-count terminator. Dropping the List
-    /// does not finish it. Errors may leave partial output.
+    /// Both branches' schemas are built and validated before writing starts.
+    /// The returned stream borrows the same sink for `'a`. Write elements
+    /// directly without calling [`ListStreamWriter::start_list`] again, then
+    /// call [`ListStreamWriter::end_list`] to emit the required zero-count
+    /// terminator. Dropping the List does not finish it, and nothing is flushed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either branch's schema cannot be built or validated,
+    /// or if the header, schema, or variant index cannot be written. Schema
+    /// failures emit no bytes; I/O failures may leave partial output. This
+    /// writer is consumed on both success and failure.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut bytes = Vec::new();
+    /// let mut stream = asonb::result_stream_writer::<u32, String, _>(&mut bytes)
+    ///     .start_ok()?;
+    /// stream.write(&7)?;
+    /// stream.end_list()?;
+    /// assert_eq!(
+    ///     asonb::de_from_slice::<Result<Vec<u32>, String>>(&bytes)?,
+    ///     Ok(vec![7]),
+    /// );
+    /// # Ok::<(), asonb::AsonbError>(())
+    /// ```
     pub fn start_ok(self) -> Result<ListStreamWriter<'a, W, T>, AsonbError> {
         let schema = DocumentSchema::of::<Result<StreamListSchema<T>, E>>()?;
         write_all(self.writer, &HEADER)?;
@@ -176,9 +258,21 @@ impl<'a, W: Write, T: Schema, E: Schema> ResultStreamWriter<'a, W, T, E> {
         })
     }
 
-    /// Writes a complete Err branch using its regular single-value encoding.
+    /// Writes a complete `Err` branch with the schema-defined encoding of `E`.
     ///
-    /// Only `E` needs Serialize; errors may leave partial output.
+    /// `error` is an application value of type `E`, not necessarily an
+    /// [`AsonbError`]. Only `E` needs `Serialize`, but both `T` and `E` need valid
+    /// schemas because the document describes the unselected successful List
+    /// too. Success completes the document without flushing the sink.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for schema construction or validation, a Serde/schema
+    /// mismatch or other serialization failure in `error`, an unrepresentable
+    /// count, or an I/O failure. Schema failures precede output; later failures
+    /// may leave partial bytes. This writer is consumed even when writing fails.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let mut bytes = Vec::new();
@@ -725,13 +819,24 @@ enum StreamState {
     Failed,
 }
 
-/// A forward-only MultiChunk List writer. Drop does not write an end marker.
+/// A forward-only writer for a MultiChunk List of `T` elements.
 ///
-/// Create it with [`list_stream_writer`], call `start_list` once, write any
-/// number of chunks, then call `end_list`. Failed output operations permanently
-/// close the writer because a partially emitted chunk cannot be undone. This
-/// type never flushes the underlying destination automatically.
-/// For a Result-wrapped List, `ResultStreamWriter::start_ok` opens it instead.
+/// Create it with [`list_stream_writer`], call [`Self::start_list`] once, write
+/// any number of chunks with [`Self::write`] or [`Self::writes`], then call
+/// [`Self::end_list`]. For a Result-wrapped List,
+/// [`ResultStreamWriter::start_ok`] opens it instead; do not call `start_list`
+/// on that returned writer.
+///
+/// The lifetime `'a` is the mutable borrow of the destination `W`. The writer
+/// stores schema and lifecycle state, not the previously written elements.
+/// Individual nested serializers may still buffer containers with unknown
+/// counts. No method seeks or automatically flushes the destination.
+///
+/// A failure after a valid operation begins permanently disables the writer:
+/// a partially emitted header, chunk, or marker cannot be undone. Invalid
+/// lifecycle calls return an error without writing or changing the state.
+/// Dropping the writer does not emit a terminator, retry a failed operation, or
+/// flush; callers must finish the List explicitly.
 pub struct ListStreamWriter<'a, W: Write, T> {
     /// Borrowed sink, used directly without seeking or whole-list buffering.
     writer: &'a mut W,
@@ -747,9 +852,19 @@ pub struct ListStreamWriter<'a, W: Write, T> {
 impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
     /// Writes the header and element schema, opening this root List.
     ///
-    /// There are no arguments. Call exactly once before writing values. Schema
-    /// errors and I/O failures leave the stream unusable; a repeated call also
-    /// returns an error. This does not write any elements or flush the sink.
+    /// Call exactly once on an idle writer returned by [`list_stream_writer`].
+    /// The element schema is constructed and validated before output begins,
+    /// even if no elements will be written. This does not write an element count,
+    /// any elements, or an end marker, and it does not flush the sink.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stream has already started, schema construction
+    /// or validation fails, or writing the header or schema fails. A schema or
+    /// I/O failure leaves the stream unusable; a repeated lifecycle call leaves
+    /// its existing state unchanged. I/O failures can leave partial output.
+    ///
+    /// # Examples
     ///
     /// ```
     /// let mut bytes = Vec::new();
@@ -781,8 +896,18 @@ impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
     /// Writes `value` as a one-element chunk without buffering the whole List.
     ///
     /// The List must be open. The borrowed value must serialize according to
-    /// `T`'s schema. Serialization or I/O errors can leave a partial chunk and
-    /// permanently disable further writes. The destination is not flushed.
+    /// `T`'s schema. Its one-element count is written before the value, so a
+    /// later serialization failure can leave an incomplete chunk. Previously
+    /// written chunks are not retained, and the destination is not flushed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the List is not open, `value` fails to serialize or
+    /// does not match the element schema, a nested count is unrepresentable, or
+    /// an I/O operation fails. Serialization and output failures permanently
+    /// disable further writes.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # let mut bytes = Vec::new();
@@ -819,8 +944,17 @@ impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
     ///
     /// An empty slice writes nothing: a zero count would terminate the List.
     /// The stream must be open, and nonempty slices must fit a u32 chunk count.
-    /// Count, serialization, or I/O failures leave the stream unusable; no
-    /// flush is performed.
+    /// Elements are serialized directly in slice order after that count; this
+    /// operation is not transactional and does not flush the destination.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stream is not open (even for an empty slice), the
+    /// chunk count exceeds `u32::MAX`, an element fails serialization or schema
+    /// checks, or an I/O operation fails. Count, serialization, or I/O failures
+    /// leave the stream unusable and can leave previously emitted bytes intact.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # let mut bytes = Vec::new();
@@ -861,9 +995,18 @@ impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
 
     /// Writes the zero-count end marker and prevents any further chunks.
     ///
-    /// There are no arguments. Only an open stream can be ended, and a failed
-    /// marker write leaves it unusable. This does not flush the destination;
-    /// flush a buffered writer yourself after releasing the stream's borrow.
+    /// This completes the document for either a root List or the List inside
+    /// `Result::Ok`. It does not flush the destination; flush a buffered writer
+    /// yourself after releasing the stream's borrow. Dropping the stream is
+    /// not a substitute for this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stream is not open, including a second attempt
+    /// to end it, or if writing the marker fails. A failed marker write leaves
+    /// the stream unusable and may leave a partial marker in the output.
+    ///
+    /// # Examples
     ///
     /// ```
     /// # let mut bytes = Vec::new();

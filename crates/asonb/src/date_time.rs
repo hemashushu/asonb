@@ -5,8 +5,17 @@
 // For more details, see the LICENSE, LICENSE.additional, and CONTRIBUTING files.
 
 //! Explicit chrono adapter for the 8-byte UTC timestamp DateTime representation.
-//! Use `#[serde(with = "asonb::date_time")]` on a chrono field, or `DateTime`
-//! for a root value. Ordinary chrono Serde strings remain ordinary Strings.
+//!
+//! Use `#[serde(with = "asonb::date_time")]` on a
+//! `chrono::DateTime<chrono::FixedOffset>` field, or [`DateTime`] for a root
+//! value. The [`derive@crate::Schema`] macro recognizes the field adapter and
+//! selects [`crate::Type::DateTime`]. Handwritten schemas must select that same
+//! scalar class; an `I64` or String schema is not interchangeable with DateTime.
+//!
+//! This is an explicit opt-in to a binary timestamp, not chrono's ordinary
+//! textual Serde representation. The wire retains only signed whole seconds
+//! since the Unix epoch. Decoding normalizes the offset to UTC, and encoding
+//! rejects rather than rounds subsecond or leap-second values.
 
 use crate::{AsonbError, Schema, SchemaBuilder, Type};
 use chrono::{DateTime as ChronoDateTime, FixedOffset};
@@ -28,7 +37,17 @@ pub(crate) const MARKER: &str = "$asonb::DateTime";
 /// The wire stores signed seconds since the Unix epoch, not the original UTC
 /// offset. Reading therefore returns the same instant at offset `+00:00`.
 /// Fractional seconds, leap seconds, and offsets outside ASON's minute-aligned
-/// range are rejected rather than rounded or silently changed.
+/// range of `-23:59` through `+23:59` are rejected rather than rounded or
+/// silently changed.
+///
+/// The public tuple constructor does not validate the timestamp; validation
+/// occurs when it is serialized. This wrapper implements [`Schema`],
+/// `Serialize`, and `Deserialize`, so it can be used as a root value or an
+/// ordinary field without a `#[serde(with = "...")]` attribute. Decoding also
+/// requires that the wire timestamp fit chrono's supported date range; use
+/// [`crate::Value::DateTime`] when the full `i64` range is needed.
+///
+/// # Examples
 ///
 /// ```
 /// let instant = chrono::DateTime::parse_from_rfc3339("2026-01-01T08:00:00+08:00")?;
@@ -40,6 +59,9 @@ pub(crate) const MARKER: &str = "$asonb::DateTime";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DateTime(
     /// The instant to encode, or the UTC-normalized instant just decoded.
+    ///
+    /// Its original offset is checked on encoding but is not preserved on
+    /// the wire. Mutating this field does not run validation.
     pub ChronoDateTime<FixedOffset>,
 );
 
@@ -67,6 +89,18 @@ impl<'de> Deserialize<'de> for DateTime {
 /// `value` supplies the instant and the offset to validate. `serializer` is the
 /// destination provided by Serde. Only whole seconds and valid ASON UTC offsets
 /// are accepted. The original offset is not written to the document.
+/// Use this through `#[serde(with = "asonb::date_time")]` together with the
+/// matching [`deserialize`] function and DateTime schema.
+///
+/// # Errors
+///
+/// Returns `S::Error` if `value` contains nonzero subsecond nanoseconds
+/// (including a chrono leap second), its offset is not a whole number of
+/// minutes within the inclusive `-23:59..=+23:59` range, or the serializer
+/// rejects the DateTime representation or fails to write it. No rounding or
+/// conversion to a String is attempted.
+///
+/// # Examples
 ///
 /// ```
 /// #[derive(serde::Serialize, asonb::Schema)]
@@ -100,7 +134,17 @@ pub fn serialize<S: Serializer>(
 /// `deserializer` must support the DateTime newtype marker used by this adapter.
 /// The wire timestamp must fit chrono's narrower supported date range; raw
 /// [`crate::Value::DateTime`] can represent timestamps that chrono cannot.
-/// Invalid input and out-of-range timestamps return a Serde error.
+/// The returned value always has zero subsecond nanoseconds and offset `+00:00`,
+/// regardless of the offset of the originally serialized value.
+///
+/// # Errors
+///
+/// Returns `D::Error` if the deserializer cannot provide a binary DateTime,
+/// the eight-byte timestamp is malformed or truncated, or its signed-second
+/// value is outside chrono's supported range. The corresponding wire schema
+/// must be DateTime, not an ordinary `I64`, Tuple, or String.
+///
+/// # Examples
 ///
 /// ```
 /// #[derive(serde::Serialize, serde::Deserialize, asonb::Schema)]
