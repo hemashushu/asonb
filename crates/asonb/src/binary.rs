@@ -11,7 +11,7 @@ use std::{
     io::{self, Read, Write},
 };
 
-use crate::AsonbError;
+use crate::{AsonbError, Encoding};
 
 /// Signature, feature flags (currently zero), and format version (currently one).
 pub(crate) const HEADER: [u8; 8] = [0, b'A', b'S', b'O', b'N', b'B', 0, 1];
@@ -287,6 +287,73 @@ impl Write for ValueBuffer {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// Writes a count in the selected framing; MultiChunk means one chunk count.
+pub(crate) fn write_length(
+    writer: &mut impl Write,
+    encoding: &Encoding,
+    count: u64,
+) -> Result<(), AsonbError> {
+    match encoding {
+        Encoding::Regular | Encoding::MultiChunk => write_u32(writer, count),
+        Encoding::Long => write_all(writer, &count.to_le_bytes()),
+    }
+}
+
+/// Reads a single regular/long length; chunk termination needs Input::chunk.
+pub(crate) fn read_length<'de>(
+    input: &mut impl Input<'de>,
+    encoding: &Encoding,
+) -> Result<u64, AsonbError> {
+    match encoding {
+        Encoding::Regular => Ok(input.u32()? as u64),
+        Encoding::Long => input.u64(),
+        Encoding::MultiChunk => Err(AsonbError::Message("Expected a chunk boundary.".into())),
+    }
+}
+
+/// Reads text or byte data, joining chunks only when framing requires it.
+/// `string` validates UTF-8, and `root` permits EOF between root-level chunks.
+pub(crate) fn read_blob<'de>(
+    input: &mut impl Input<'de>,
+    encoding: &Encoding,
+    string: bool,
+    root: bool,
+) -> Result<Cow<'de, [u8]>, AsonbError> {
+    if *encoding != Encoding::MultiChunk {
+        let length = read_length(input, encoding)?;
+        let bytes = input.payload(length)?;
+        if string {
+            validate_utf8(&bytes, input.offset() - length)?;
+        }
+        return Ok(bytes);
+    }
+    let mut output = Vec::new();
+    loop {
+        let length = input.chunk(root)? as u64;
+        if length == 0 {
+            break;
+        }
+        let bytes = input.payload(length)?;
+        // Every text chunk must be valid UTF-8 on its own. A multibyte character
+        // cannot be split across chunks even if the joined bytes would be valid.
+        if string {
+            validate_utf8(&bytes, input.offset() - length)?;
+        }
+        output
+            .try_reserve(bytes.len())
+            .map_err(|error| AsonbError::Message(error.to_string()))?;
+        output.extend_from_slice(&bytes);
+    }
+    Ok(Cow::Owned(output))
+}
+
+/// Reports invalid UTF-8 at the starting document offset of this payload.
+fn validate_utf8(bytes: &[u8], offset: u64) -> Result<(), AsonbError> {
+    std::str::from_utf8(bytes)
+        .map(|_| ())
+        .map_err(|error| AsonbError::MessageWithOffset(error.to_string(), offset))
 }
 
 #[cfg(test)]

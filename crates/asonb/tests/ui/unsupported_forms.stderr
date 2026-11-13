@@ -1,41 +1,47 @@
 error: unit, newtype, and tuple structs are unsupported by ASONB
- --> tests/ui/unsupported_forms.rs:7:8
-  |
-7 | struct Unit;
-  |        ^^^^
+  --> tests/ui/unsupported_forms.rs:13:8
+   |
+13 | struct Unit;
+   |        ^^^^
 
 error: unit, newtype, and tuple structs are unsupported by ASONB
-  --> tests/ui/unsupported_forms.rs:11:8
+  --> tests/ui/unsupported_forms.rs:17:8
    |
-11 | struct Width(
+17 | struct Width(
    |        ^^^^^
 
 error: unit, newtype, and tuple structs are unsupported by ASONB
-  --> tests/ui/unsupported_forms.rs:18:8
+  --> tests/ui/unsupported_forms.rs:24:8
    |
-18 | struct RGB(
+24 | struct RGB(
    |        ^^^
 
-error: unit, newtype, and tuple structs are unsupported by ASONB
-  --> tests/ui/unsupported_forms.rs:29:8
-   |
-29 | struct EmptyTuple();
-   |        ^^^^^^^^^^
-
-error: unit, newtype, and tuple structs are unsupported by ASONB
-  --> tests/ui/unsupported_forms.rs:34:8
-   |
-34 | struct Transparent(
-   |        ^^^^^^^^^^^
-
 error: tuple-like variants require at least two serialized elements
-  --> tests/ui/unsupported_forms.rs:43:5
+  --> tests/ui/unsupported_forms.rs:37:5
    |
-43 |     Empty(),
+37 |     Empty(),
    |     ^^^^^
 
 error: tuple-like variants require at least two serialized elements
-  --> tests/ui/unsupported_forms.rs:50:5
+  --> tests/ui/unsupported_forms.rs:44:5
    |
-50 |     One(
+44 |     One(
    |     ^^^
+
+error: unions do not have an ASONB schema
+  --> tests/ui/unsupported_forms.rs:54:7
+   |
+54 | union UnsupportedUnion {
+   |       ^^^^^^^^^^^^^^^^
+
+error: transparent Schema requires one serialized field
+  --> tests/ui/unsupported_forms.rs:61:8
+   |
+61 | struct MultipleTransparentFields {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: transparent Schema requires one serialized field
+  --> tests/ui/unsupported_forms.rs:68:8
+   |
+68 | struct NoTransparentFields {
+   |        ^^^^^^^^^^^^^^^^^^^

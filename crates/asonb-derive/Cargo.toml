@@ -1,11 +1,10 @@
 [package]
 name = "asonb-derive"
-version = "3.4.0"
+version = "4.0.0"
 edition = "2024"
 
 license-file = "LICENSE.additional"
 description = "Schema derive macro for ASONB"
-homepage = "https://github.com/hemashushu/asonb"
 repository = "https://github.com/hemashushu/asonb"
 documentation = "https://docs.rs/asonb-derive"
 readme = "../../README.md"

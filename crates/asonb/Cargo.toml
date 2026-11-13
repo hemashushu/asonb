@@ -1,11 +1,10 @@
 [package]
 name = "asonb"
-version = "3.6.1"
+version = "4.0.0"
 edition = "2024"
 
 license-file = "LICENSE.additional"
 description = "ASONB is a binary representation of ASON optimized for efficient storage, access, and transmission."
-homepage = "https://github.com/hemashushu/asonb"
 repository = "https://github.com/hemashushu/asonb"
 readme = "../../README.md"
 keywords = ["ason", "asonb", "serde"]
@@ -15,7 +14,7 @@ categories = ["encoding", "parsing"]
 serde = { version = "1.0", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde_bytes = "0.11"
-asonb-derive = { path = "../asonb-derive", version = "3.4.0" }
+asonb-derive = { path = "../asonb-derive", version = "4.0.0" }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

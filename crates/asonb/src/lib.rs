@@ -88,9 +88,6 @@
 //! Write failures can leave partial output, so discard or otherwise handle that
 //! output rather than assuming a failed write was rolled back.
 
-pub mod array;
-pub mod date_time;
-
 mod binary;
 mod de;
 mod error;
@@ -101,18 +98,22 @@ mod value;
 #[cfg(test)]
 mod test_utils;
 
-extern crate self as asonb;
+// extern crate self as asonb;
 
+pub mod array;
+pub mod date_time;
 pub use asonb_derive::Schema;
 pub use error::AsonbError;
 pub use schema::{DocumentSchema, Encoding, Field, Schema, SchemaBuilder, Type, Variant};
+pub use value::{Value, VariantValue};
 
 pub use de::{
     ListStreamReader, ResultStreamReader, ValueDocumentReader, de_from_reader, de_from_slice,
-    list_stream_reader, result_stream_reader, value_document_reader,
+    de_value_from_reader, de_value_from_slice, list_stream_reader, result_stream_reader,
+    value_document_reader,
 };
+
 pub use ser::{
     ListStreamWriter, ResultStreamWriter, list_stream_writer, result_stream_writer, ser_to_bytes,
-    ser_to_writer,
+    ser_to_writer, ser_value_to_writer,
 };
-pub use value::{Value, de_value_from_reader, de_value_from_slice, ser_value_to_writer};

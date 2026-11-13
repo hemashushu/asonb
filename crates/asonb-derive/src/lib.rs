@@ -323,7 +323,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 quote!(#ty)
             } else {
                 match &data.fields {
-                    Fields::Named(_) => quote!(#root::Type::Object(#name.into(),vec![#(#parts),*])),
+                    Fields::Named(_) => quote!(#root::Type::Object(vec![#(#parts),*])),
                     _ => unreachable!(),
                 }
             }

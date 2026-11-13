@@ -87,7 +87,7 @@ pub fn serialize<S: Serializer>(
             "ASONB DateTime only supports whole seconds.",
         ));
     }
-    if !crate::value::is_valid_ason_utc_offset(value.offset().local_minus_utc()) {
+    if !is_valid_ason_utc_offset(value.offset().local_minus_utc()) {
         return Err(serde::ser::Error::custom("Invalid ASON UTC offset."));
     }
     // The marker selects DateTime handling. The one-element tuple carries the
@@ -139,6 +139,15 @@ pub fn deserialize<'de, D: Deserializer<'de>>(
         }
     }
     deserializer.deserialize_newtype_struct(MARKER, Visitor)
+}
+
+/// ASON permits minute-aligned offsets through 23:59 in either direction.
+const MAX_ASON_UTC_OFFSET_SECONDS: i32 = 23 * 60 * 60 + 59 * 60;
+
+/// Accepts only whole-minute offsets within ASON's inclusive +/-23:59 range.
+pub(crate) fn is_valid_ason_utc_offset(offset: i32) -> bool {
+    (-MAX_ASON_UTC_OFFSET_SECONDS..=MAX_ASON_UTC_OFFSET_SECONDS).contains(&offset)
+        && offset % 60 == 0
 }
 
 #[cfg(test)]

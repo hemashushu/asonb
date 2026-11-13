@@ -70,7 +70,7 @@ The APIs use [Serde](https://github.com/serde-rs/serde) (the serialization frame
 
 ```toml
 [dependencies]
-asonb = "3.5.0" # Use the latest version of the ASONB crate
+asonb = "4.0.0" # Use the latest version of the ASONB crate
 serde = { version = "1", features = ["derive"] }
 ```
 
@@ -143,13 +143,13 @@ For pipelines, sockets, and incremental producers, the streaming APIs process a 
 
 The streaming APIs accept documents whose root value is a multi-chunk `List`, or a Rust `Result` whose `Ok` payload is a multi-chunk List. Result streams use the existing Enumeration and List encodings without changing the ASONB format.
 
-The serializer opens a list, writes elements as they become available, and finishes with an explicit end marker:
+The streaming serializer lets you open a list writer, write elements individually or in batches, and then close the list explicitly. This example writes four objects to standard output:
 
 ```rust
 use std::io::Write;
 
-use serde::{Deserialize, Serialize};
 use asonb::Schema;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
 struct Object {
@@ -160,18 +160,28 @@ struct Object {
 fn main() {
     let o1 = Object {
         id: 11,
-        name: "foo".to_owned(),
+        name: "Alice".to_string(),
     };
 
     let o2 = Object {
         id: 13,
-        name: "bar".to_owned(),
+        name: "Bob".to_string(),
+    };
+
+    let o3 = Object {
+        id: 17,
+        name: "Charlie".to_string(),
+    };
+
+    let o4 = Object {
+        id: 19,
+        name: "David".to_string(),
     };
 
     let mut output = std::io::stdout().lock();
     let mut stream_writer = asonb::list_stream_writer::<Object, _>(&mut output);
 
-    // Write the document header and schema before the elements.
+    // Write the document header and schema, then start the list.
     stream_writer.start_list().unwrap();
 
     // Serialize the first element.
@@ -180,32 +190,27 @@ fn main() {
     // Serialize the second element.
     stream_writer.write(&o2).unwrap();
 
-    // Serialize multiple elements at once is also supported.
-    // stream_writer.writes(&[o3, o4]).unwrap();
+    // Serialize the third and fourth element.
+    stream_writer.writes(&[o3, o4]).unwrap();
 
-    // Write the list end marker.
+    // End the list explicitly.
     stream_writer.end_list().unwrap();
 
     output.flush().unwrap();
-
-    let mut stderr = std::io::stderr().lock();
-    writeln!(&mut stderr, "Streaming serialization successful!").unwrap();
 }
 ```
 
-The deserializer reads the root list incrementally from a binary source, such as a pipe, socket, or standard input:
+The streaming deserializer reads the root list incrementally from a binary source (e.g., a pipe, a socket, or standard input). The typical flow is:
 
-1. Open a list reader on a `Read` source.
-2. Call `next()` to read each element, handling any returned error. A call may block until enough bytes are available.
-3. Stop when `next()` returns `None`, indicating an end marker or EOF at a valid root chunk boundary.
+1. Pass any `Read` source directly to `asonb::list_stream_reader`.
+2. Call `next()` repeatedly; each call deserializes the next element and may block until enough bytes are available.
+3. Stop when `next()` returns `None`, which indicates an end marker or EOF at a valid root chunk boundary.
 
 For example, the following program reads the list of objects written by the serializer above:
 
 ```rust
-use std::io::Write;
-
-use serde::{Deserialize, Serialize};
 use asonb::Schema;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
 struct Object {
@@ -223,7 +228,7 @@ fn main() {
         o1,
         Object {
             id: 11,
-            name: "foo".to_owned()
+            name: "Alice".to_string()
         }
     );
 
@@ -233,22 +238,35 @@ fn main() {
         o2,
         Object {
             id: 13,
-            name: "bar".to_owned()
+            name: "Bob".to_string()
         }
     );
 
-    // Read the remaining elements until the end of the list.
-    while let Some(result) = stream_reader.next() {
-        let _object: Object = result.unwrap();
-        // ...
+    // Deserialize the remaining elements until the end of the list.
+    let mut objs = vec![];
+    for result in stream_reader {
+        objs.push(result.unwrap());
     }
 
-    let mut stderr = std::io::stderr().lock();
-    writeln!(&mut stderr, "Streaming deserialization successful!").unwrap();
+    assert_eq!(
+        objs,
+        vec![
+            Object {
+                id: 17,
+                name: "Charlie".to_string()
+            },
+            Object {
+                id: 19,
+                name: "David".to_string()
+            }
+        ]
+    );
+
+    println!("Success: received all elements correctly.");
 }
 ```
 
-The example programs can be built and run with:
+The List streaming examples are available in [stream-writer.rs](crates/asonb/examples/stream-writer.rs) and [stream-reader.rs](crates/asonb/examples/stream-reader.rs). Build and run them with:
 
 ```sh
 cargo build --examples
@@ -256,44 +274,156 @@ cd target/debug/examples
 ./stream-writer | ./stream-reader
 ```
 
+The reader verifies all four objects and prints `Success: received all elements correctly.`.
+
 The stream reader returns an error once and then stops. The writer rejects writes before `start_list()` or after `end_list()` or a failed write. Dropping the writer does not add an end marker. Unlike the single-document reader, the stream reader does not probe beyond an explicit end marker, so it can be used on a live socket.
 
-For `Result<Vec<T>, E>`, use `result_stream_writer::<T, E, _>` and `result_stream_reader::<T, E, _>`. `T` is the List element type and `E` is the business error type; they need not be the same:
+For `Result<Vec<T>, E>`, use `result_stream_writer::<T, E, _>` and `result_stream_reader::<T, E, _>`. `T` is the List element type and `E` is the business error type; they need not be the same.
+
+The following writer streams an `Ok` List containing the same four objects, or writes `Err("Eve")` when run with `--error`:
 
 ```rust
-fn main() -> Result<(), asonb::AsonbError> {
-    let mut bytes = Vec::new();
-    let mut stream = asonb::result_stream_writer::<i32, String, _>(&mut bytes).start_ok()?;
-    stream.write(&11)?;
-    stream.writes(&[13, 17])?;
-    stream.end_list()?;
+use std::io::Write;
 
-    match asonb::result_stream_reader::<i32, String, _>(bytes.as_slice())? {
-        asonb::ResultStreamReader::Ok(stream) => {
-            let values = stream.collect::<Result<Vec<_>, _>>()?;
-            assert_eq!(values, vec![11, 13, 17]);
-        }
-        asonb::ResultStreamReader::Err(error) => panic!("{error}"),
+use asonb::Schema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+struct Object {
+    id: i32,
+    name: String,
+}
+
+fn main() {
+    let mut output = std::io::stdout().lock();
+    if std::env::args().any(|arg| arg == "--error") {
+        asonb::result_stream_writer::<Object, String, _>(&mut output)
+            .write_err(&"Eve".to_string())
+            .unwrap();
+
+        output.flush().unwrap();
+    } else {
+        let o1 = Object {
+            id: 11,
+            name: "Alice".to_string(),
+        };
+
+        let o2 = Object {
+            id: 13,
+            name: "Bob".to_string(),
+        };
+
+        let o3 = Object {
+            id: 17,
+            name: "Charlie".to_string(),
+        };
+
+        let o4 = Object {
+            id: 19,
+            name: "David".to_string(),
+        };
+
+        let mut stream_writer = asonb::result_stream_writer::<Object, String, _>(&mut output)
+            .start_ok()
+            .unwrap();
+
+        // Serialize the first element.
+        stream_writer.write(&o1).unwrap();
+
+        // Serialize the second element.
+        stream_writer.write(&o2).unwrap();
+
+        // Serialize the third and fourth element.
+        stream_writer.writes(&[o3, o4]).unwrap();
+
+        // End the list and the Result explicitly.
+        stream_writer.end_list().unwrap();
+
+        output.flush().unwrap();
     }
-    assert_eq!(
-        asonb::de_from_slice::<Result<Vec<i32>, String>>(&bytes)?,
-        Ok(vec![11, 13, 17])
-    );
-
-    let mut bytes = Vec::new();
-    asonb::result_stream_writer::<i32, String, _>(&mut bytes)
-        .write_err(&"failed".to_owned())?;
-    assert!(matches!(
-        asonb::result_stream_reader::<i32, String, _>(bytes.as_slice())?,
-        asonb::ResultStreamReader::Err(error) if error == "failed"
-    ));
-    Ok(())
 }
 ```
 
 `result_stream_writer` creates an idle `ResultStreamWriter` and writes nothing. Both `T: Schema` and `E: Schema` are required because the document schema describes both branches, even the unselected one. `start_ok(self)` writes the header, schema and Ok variant index, returning an already-open `ListStreamWriter`; do not call `start_list` again. Use `write`, `writes` and `end_list` as usual. Alternatively, `write_err(self, &E)` writes the complete error branch. These consuming methods prevent selecting both branches on the same writer. Only the selected payload needs `Serialize`. Schema validation precedes output, but serialization and I/O failures may leave partial output. No method flushes the destination or automatically finishes a dropped List writer.
 
 `result_stream_reader` returns `Result<ResultStreamReader<T, E, R>, AsonbError>` and requires `T: DeserializeOwned`, `E: DeserializeOwned`, and `R: Read`; neither payload type needs `Schema` when reading. It validates the header and root Result schema and selects the variant by name rather than assuming a fixed wire index. An `Ok(ListStreamReader<T, R>)` decodes List elements incrementally; an `Err(E)` decodes the complete business error before returning. Business errors are successful decoding outcomes, while schema, payload and I/O errors use `AsonbError`. List element errors are returned during iteration, once, followed by permanent exhaustion.
+
+The corresponding reader matches on the Result and checks the four objects in the `Ok` branch or the `"Eve"` error in the `Err` branch:
+
+```rust
+use asonb::Schema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+struct Object {
+    id: i32,
+    name: String,
+}
+
+fn main() {
+    let mut input = std::io::stdin().lock();
+    match asonb::result_stream_reader::<Object, String, _>(&mut input).unwrap() {
+        asonb::ResultStreamReader::Ok(mut stream_reader) => {
+            // Deserialize the first element.
+            let o1: Object = stream_reader.next().unwrap().unwrap();
+            assert_eq!(
+                o1,
+                Object {
+                    id: 11,
+                    name: "Alice".to_string()
+                }
+            );
+
+            // Deserialize the second element.
+            let o2: Object = stream_reader.next().unwrap().unwrap();
+            assert_eq!(
+                o2,
+                Object {
+                    id: 13,
+                    name: "Bob".to_string()
+                }
+            );
+
+            // Deserialize the remaining elements until the end of the list.
+            let mut objs = vec![];
+            for result in stream_reader {
+                objs.push(result.unwrap());
+            }
+
+            assert_eq!(
+                objs,
+                vec![
+                    Object {
+                        id: 17,
+                        name: "Charlie".to_string()
+                    },
+                    Object {
+                        id: 19,
+                        name: "David".to_string()
+                    }
+                ]
+            );
+
+            println!("Success: received \"Result::Ok\"");
+        }
+        asonb::ResultStreamReader::Err(error) => {
+            assert_eq!(error, "Eve");
+            println!("Success: received \"Result::Err\"");
+        }
+    };
+}
+```
+
+Separate Result streaming examples are available in [result-writer.rs](crates/asonb/examples/result-writer.rs) and [result-reader.rs](crates/asonb/examples/result-reader.rs). Build and run them with:
+
+```sh
+cargo build --examples
+cd target/debug/examples
+./result-writer | ./result-reader
+./result-writer --error | ./result-reader
+```
+
+The reader prints `Success: received "Result::Ok"` for the first command and `Success: received "Result::Err"` for the second. It handles both branches without additional flags.
 
 Unlike a root MultiChunk List, the List inside Result requires an explicit zero-count end marker: EOF at a chunk boundary is truncation, not success. Consume the iterator to its end to validate the marker; stopping early leaves the remaining payload unvalidated. Neither Result branch probes for EOF or trailing bytes. Pass `&mut reader` to retain the source after dropping the stream; bytes after a completed Result remain unread.
 
@@ -880,18 +1010,17 @@ Its value encoding is:
 
 An Object has a fixed set of named fields whose types and order are defined in the schema.
 
-The type definition for an Object starts with `0xA0`, followed by the object name as a regular string, the number of fields, and then each field's key as a regular string and its type in order:
+The type definition for an Object starts with `0xA0`, followed by the number of fields, and then each field's key as a regular string and its type in order:
 
 ```text
 [
     0xA0,
-    object name as a regular String,
     field count in `u32`,
     [field name as a regular String, field type]...
 ]
 ```
 
-The object name is optional metadata and is not required to locate or decode fields. An unnamed Object uses an empty regular String (`[0x00, 0x00, 0x00, 0x00]`).
+Like ASON Objects, ASONB Objects are anonymous: the schema records only their fields, not a type name.
 
 Field names must be unique. Field values appear in schema order.
 
@@ -918,7 +1047,6 @@ Its type definition is:
     /* type definition */
 
     0xA0,                                       // Object type class
-    0x00, 0x00, 0x00, 0x00,                     // Empty object name
     0x03, 0x00, 0x00, 0x00,                     // Field count: three
 
     /* field "id": i32 */
@@ -1057,7 +1185,7 @@ The table is optional, even when complex types are defined inline. An empty tabl
 
 Each entry in the reference-type table is a complete type definition. Any supported type can be stored in the table and referenced using `[0xC0, index in u32]`.
 
-For example, consider these two Object schemas:
+For example, consider these two Object schemas, labeled `Address` and `Person` here for readability only; the labels are not stored in the document:
 
 ```text
 Object Address: {
@@ -1083,8 +1211,6 @@ Their reference-type table is:
 
     /* Object type: Address */
     0xA0,                                       // Object type class
-    0x07, 0x00, 0x00, 0x00,                     // Object name byte length
-    0x41, 0x64, 0x64, 0x72, 0x65, 0x73, 0x73,   // "Address" as String
     0x02, 0x00, 0x00, 0x00,                     // Field count: two
 
     0x06, 0x00, 0x00, 0x00,                     // Field name byte length
@@ -1097,8 +1223,6 @@ Their reference-type table is:
 
     /* Object type: Person */
     0xA0,                                       // Object type class
-    0x06, 0x00, 0x00, 0x00,                     // Object name byte length
-    0x50, 0x65, 0x72, 0x73, 0x6F, 0x6E,         // "Person" as String
     0x03, 0x00, 0x00, 0x00,                     // Field count: three
 
     0x04, 0x00, 0x00, 0x00,                     // Field name byte length

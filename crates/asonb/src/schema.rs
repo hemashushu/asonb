@@ -82,10 +82,8 @@ pub enum Type {
         /// Element types, in payload order.
         Vec<Type>,
     ),
-    /// A named, nonempty set of fields; values follow schema order on the wire.
+    /// A nonempty set of named fields; values follow schema order on the wire.
     Object(
-        /// The descriptive object name.
-        String,
         /// Field names and types, in payload order.
         Vec<Field>,
     ),
@@ -308,7 +306,7 @@ impl DocumentSchema {
                 }
                 items.iter().collect()
             }
-            Type::Object(_, fields) => {
+            Type::Object(fields) => {
                 validate_fields(fields)?;
                 fields.iter().map(|field| &field.ty).collect()
             }
@@ -552,7 +550,7 @@ fn write_type(writer: &mut impl Write, ty: &Type) -> Result<(), AsonbError> {
             }
         }
         Type::Tuple(_) => 0x90,
-        Type::Object(_, _) => 0xa0,
+        Type::Object(_) => 0xa0,
         Type::Enum(_, _) => 0xb0,
         Type::Reference(_) => 0xc0,
     };
@@ -568,10 +566,7 @@ fn write_type(writer: &mut impl Write, ty: &Type) -> Result<(), AsonbError> {
             write_type(writer, value)?;
         }
         Type::Tuple(types) => write_types(writer, types)?,
-        Type::Object(name, fields) => {
-            write_name(writer, name)?;
-            write_fields(writer, fields)?;
-        }
+        Type::Object(fields) => write_fields(writer, fields)?,
         Type::Enum(name, variants) => {
             write_name(writer, name)?;
             write_u32(writer, variants.len() as u64)?;
@@ -656,7 +651,7 @@ fn read_type<'de>(input: &mut impl Input<'de>) -> Result<Type, AsonbError> {
             Box::new(read_type(input)?),
         ),
         0x90 => Type::Tuple(read_types(input)?),
-        0xa0 => Type::Object(read_name(input)?, read_fields(input)?),
+        0xa0 => Type::Object(read_fields(input)?),
         0xb0 => {
             let name = read_name(input)?;
             let count = input.u32()?;
@@ -891,6 +886,17 @@ tuple_schema!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
 tuple_schema!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
 tuple_schema!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
 
+/// Turns a variant shape into the type used by the shared payload machinery.
+/// The empty unit Tuple is internal: it is not a standalone document schema.
+pub(crate) fn payload_type(variant: &Variant) -> Type {
+    match variant {
+        Variant::Unit(_) => Type::Tuple(vec![]),
+        Variant::Newtype(_, ty) => ty.clone(),
+        Variant::Tuple(_, types) => Type::Tuple(types.clone()),
+        Variant::Struct(_, fields) => Type::Object(fields.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -914,7 +920,7 @@ mod tests {
             Type::Char,
             Type::DateTime,
             Type::Tuple(vec![Type::Bool]),
-            Type::Object("".into(), vec![Field::new("a", Type::I32)]),
+            Type::Object(vec![Field::new("a", Type::I32)]),
             Type::Enum(
                 "E".into(),
                 vec![
@@ -980,7 +986,7 @@ mod tests {
     fn test_container_arity_validation() {
         for ty in [
             Type::Tuple(vec![]),
-            Type::Object("Empty".into(), vec![]),
+            Type::Object(vec![]),
             Type::Enum("E".into(), vec![Variant::Tuple("Empty".into(), vec![])]),
             Type::Enum(
                 "E".into(),
@@ -1048,10 +1054,10 @@ mod tests {
             );
         }
         assert!(
-            DocumentSchema::new(Type::Object(
-                "".into(),
-                vec![Field::new("x", Type::I8), Field::new("x", Type::I8)]
-            ))
+            DocumentSchema::new(Type::Object(vec![
+                Field::new("x", Type::I8),
+                Field::new("x", Type::I8)
+            ]))
             .validate()
             .is_err()
         );
@@ -1084,7 +1090,7 @@ mod tests {
     /// Covers ASON's Unicode ranges and disallowed identifier punctuation.
     fn test_ason_identifier_validation() {
         for name in ["_field2", "field_2", "文🙂"] {
-            DocumentSchema::new(Type::Object("".into(), vec![Field::new(name, Type::I8)]))
+            DocumentSchema::new(Type::Object(vec![Field::new(name, Type::I8)]))
                 .validate()
                 .unwrap();
             DocumentSchema::new(Type::Enum(name.into(), vec![Variant::Unit(name.into())]))
@@ -1101,7 +1107,7 @@ mod tests {
             "\u{7f}",
         ] {
             assert!(
-                DocumentSchema::new(Type::Object("".into(), vec![Field::new(name, Type::I8)],))
+                DocumentSchema::new(Type::Object(vec![Field::new(name, Type::I8)],))
                     .validate()
                     .is_err()
             );
@@ -1131,10 +1137,7 @@ mod tests {
             vec![Type::Reference(0)],
             vec![Type::Reference(1), Type::Reference(0)],
             vec![Type::List(Encoding::Regular, Box::new(Type::Reference(0)))],
-            vec![Type::Object(
-                "Node".into(),
-                vec![Field::new("next", Type::Reference(0))],
-            )],
+            vec![Type::Object(vec![Field::new("next", Type::Reference(0))])],
             vec![Type::Enum(
                 "Node".into(),
                 vec![Variant::Newtype("Next".into(), Type::Reference(0))],
@@ -1296,7 +1299,7 @@ mod tests {
         ] {
             let expected = format!("Field name \"{key}\" is reserved by ASON.");
             for ty in [
-                Type::Object("".into(), vec![Field::new(key, Type::I32)]),
+                Type::Object(vec![Field::new(key, Type::I32)]),
                 Type::Enum(
                     "E".into(),
                     vec![Variant::Struct(
@@ -1316,7 +1319,7 @@ mod tests {
         for key in [
             "some", "NONE", "ok", "ERR", "True", "nan", "Inf_i32", "Some_",
         ] {
-            DocumentSchema::new(Type::Object("".into(), vec![Field::new(key, Type::I32)]))
+            DocumentSchema::new(Type::Object(vec![Field::new(key, Type::I32)]))
                 .validate()
                 .unwrap();
         }

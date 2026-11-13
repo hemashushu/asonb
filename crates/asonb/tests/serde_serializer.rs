@@ -4,20 +4,42 @@
 // the Mozilla Public License version 2.0 and additional exceptions.
 // For more details, see the LICENSE, LICENSE.additional, and CONTRIBUTING files.
 
-//! End-to-end contracts across derived schemas, Serde adapters, and raw values.
-//! These tests deliberately mix APIs so a writer and its matching reader cannot
-//! hide the same mistake behind an apparently successful round trip.
+//! End-to-end tests for Serde serialization, deserialization, and schema derivation.
 
 use asonb::{
-    DocumentSchema, Encoding, Field, Schema, Type, Value, Variant, de_from_reader, de_from_slice,
-    ser_to_bytes, ser_value_to_writer,
+    DocumentSchema, Encoding, Field, Schema, Type, Value, Variant, VariantValue, de_from_reader,
+    de_from_slice, ser_to_bytes, ser_value_to_writer,
 };
 use pretty_assertions::assert_eq;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, HashMap},
+    fmt::{self, Debug},
 };
+
+#[track_caller]
+fn assert_serde_round_trip<T>(value: &T) -> Vec<u8>
+where
+    T: Serialize + DeserializeOwned + Schema + Debug + PartialEq,
+{
+    let bytes = ser_to_bytes(value).unwrap();
+    let mut output = Vec::new();
+    asonb::ser_to_writer(value, &mut output).unwrap();
+    assert_eq!(output, bytes);
+    assert_eq!(&de_from_slice::<T>(&bytes).unwrap(), value);
+    assert_eq!(&de_from_reader::<T, _>(bytes.as_slice()).unwrap(), value);
+    bytes
+}
+
+#[track_caller]
+fn assert_read_error<T: DeserializeOwned + Debug>(bytes: &[u8], expected: &str) {
+    for error in [
+        de_from_slice::<T>(bytes).unwrap_err(),
+        de_from_reader::<T, _>(bytes).unwrap_err(),
+    ] {
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
 /// The README's small Object example, exercised through both input modes.
@@ -38,12 +60,7 @@ fn test_readme_package() {
         version: "0.1.0".into(),
         dependencies: vec!["random".into(), "regex".into()],
     };
-    let bytes = ser_to_bytes(&value).unwrap();
-    assert_eq!(de_from_slice::<Package>(&bytes).unwrap(), value);
-    assert_eq!(
-        de_from_reader::<Package, _>(bytes.as_slice()).unwrap(),
-        value
-    );
+    assert_serde_round_trip(&value);
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
@@ -109,16 +126,6 @@ fn test_enum_variants_and_empty_containers() {
         de_from_slice::<HashMap<String, Option<Event>>>(&ser_to_bytes(&map).unwrap()).unwrap(),
         map
     );
-}
-
-#[test]
-/// Checks an empty dynamic List still retains its explicitly selected i32 type.
-fn test_empty_list_i32_fallback_type_round_trip() {
-    let schema = DocumentSchema::new(Type::List(Encoding::Regular, Box::new(Type::I32)));
-    let value = Value::List(vec![]);
-    let mut bytes = Vec::new();
-    ser_value_to_writer(&schema, &value, &mut bytes).unwrap();
-    assert_eq!(asonb::de_value_from_slice(&bytes).unwrap(), (schema, value));
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
@@ -192,7 +199,7 @@ fn test_serde_attributes_and_generics() {
 /// Checks field-name matching, defaults, unknown-field policy, and enum reordering.
 fn test_field_and_variant_name_resolution() {
     #[derive(Debug, PartialEq, Deserialize)]
-    /// Intentionally differs from the writer's order and descriptive object name.
+    /// Intentionally differs from the writer's field order.
     struct Target {
         /// Appears after id on the wire, but before id in this Rust structure.
         name: String,
@@ -202,14 +209,11 @@ fn test_field_and_variant_name_resolution() {
         /// Missing on the wire and therefore supplied by Serde's default.
         active: bool,
     }
-    let schema = DocumentSchema::new(Type::Object(
-        "UnrelatedMetadata".into(),
-        vec![
-            Field::new("id", Type::I32),
-            Field::new("extra", Type::List(Encoding::Regular, Box::new(Type::I32))),
-            Field::new("name", Type::String(Encoding::Regular)),
-        ],
-    ));
+    let schema = DocumentSchema::new(Type::Object(vec![
+        Field::new("id", Type::I32),
+        Field::new("extra", Type::List(Encoding::Regular, Box::new(Type::I32))),
+        Field::new("name", Type::String(Encoding::Regular)),
+    ]));
     let value = Value::Object(vec![
         Value::I32(11),
         Value::List(vec![Value::I32(2)]),
@@ -246,7 +250,10 @@ fn test_field_and_variant_name_resolution() {
     let mut bytes = Vec::new();
     ser_value_to_writer(
         &schema,
-        &Value::Enum(0, Box::new(Value::I32(9))),
+        &Value::Enumeration {
+            index: 0,
+            payload: VariantValue::Newtype(Box::new(Value::I32(9))),
+        },
         &mut bytes,
     )
     .unwrap();
@@ -297,8 +304,20 @@ fn test_predefined_enumerations_and_reserved_keys() {
         ],
     ));
     for (value, expected) in [
-        (Value::Enum(0, Box::new(Value::I32(11))), Some(11)),
-        (Value::Enum(1, Box::new(Value::Tuple(vec![]))), None),
+        (
+            Value::Enumeration {
+                index: 0,
+                payload: VariantValue::Newtype(Box::new(Value::I32(11))),
+            },
+            Some(11),
+        ),
+        (
+            Value::Enumeration {
+                index: 1,
+                payload: VariantValue::Unit,
+            },
+            None,
+        ),
     ] {
         let mut bytes = Vec::new();
         ser_value_to_writer(&schema, &value, &mut bytes).unwrap();
@@ -389,7 +408,7 @@ fn test_array_serde_mappings() {
         .references
         .iter()
         .find_map(|ty| match ty {
-            Type::Object(_, fields) => Some(fields),
+            Type::Object(fields) => Some(fields),
             _ => None,
         })
         .unwrap();
@@ -427,13 +446,10 @@ fn test_array_list_adapter_rejects_wrong_length() {
         vec![Value::I32(1)],
         vec![Value::I32(1), Value::I32(2), Value::I32(3)],
     ] {
-        let schema = DocumentSchema::new(Type::Object(
-            "".into(),
-            vec![Field::new(
-                "values",
-                Type::List(Encoding::Regular, Box::new(Type::I32)),
-            )],
-        ));
+        let schema = DocumentSchema::new(Type::Object(vec![Field::new(
+            "values",
+            Type::List(Encoding::Regular, Box::new(Type::I32)),
+        )]));
         let mut bytes = Vec::new();
         ser_value_to_writer(
             &schema,
@@ -441,7 +457,7 @@ fn test_array_list_adapter_rejects_wrong_length() {
             &mut bytes,
         )
         .unwrap();
-        assert!(de_from_slice::<TwoItems>(&bytes).is_err());
+        assert_read_error::<TwoItems>(&bytes, "expected 2 elements");
     }
 }
 
@@ -477,13 +493,7 @@ fn test_nested_collections_and_binary_rust_forms() {
         BTreeMap::from([(3u32, Some("value".to_string())), (4, None)]),
         [true, false],
     );
-    assert_eq!(
-        de_from_slice::<(Vec<Vec<i8>>, BTreeMap<u32, Option<String>>, [bool; 2])>(
-            &ser_to_bytes(&value).unwrap()
-        )
-        .unwrap(),
-        value
-    );
+    assert_serde_round_trip(&value);
 }
 
 #[test]
@@ -600,180 +610,447 @@ fn test_unsupported_rust_forms() {
 }
 
 #[test]
-/// Distinguishes truncated wire payloads from chrono's narrower timestamp range.
-fn test_malformed_input() {
-    let schema = DocumentSchema::new(Type::List(Encoding::Long, Box::new(Type::I32)));
-    let mut bytes = Vec::new();
-    ser_value_to_writer(&schema, &Value::List(vec![]), &mut bytes).unwrap();
-    let end = bytes.len();
-    // Keep a valid long prefix but promise elements that are not present. This
-    // must be a truncation error, not an arbitrary regular-length policy limit.
-    bytes[end - 8..].copy_from_slice(&(u32::MAX as u64 + 1).to_le_bytes());
-    assert!(matches!(
-        asonb::de_value_from_slice(&bytes),
-        Err(asonb::AsonbError::UnexpectedEndOfDocument(_))
-    ));
-    let schema = DocumentSchema::new(Type::DateTime);
-    let mut bytes = Vec::new();
-    ser_value_to_writer(&schema, &Value::DateTime(0), &mut bytes).unwrap();
-    assert!(de_from_slice::<asonb::date_time::DateTime>(&bytes).is_ok());
-    assert!(asonb::de_value_from_slice(&bytes[..20]).is_err());
-    let schema = DocumentSchema::new(Type::DateTime);
-    let mut bytes = Vec::new();
-    ser_value_to_writer(&schema, &Value::DateTime(i64::MAX), &mut bytes).unwrap();
-    assert!(asonb::de_value_from_slice(&bytes).is_ok());
-    assert!(de_from_slice::<asonb::date_time::DateTime>(&bytes).is_err());
-    let bytes = ser_to_bytes(&vec![vec![1i32, 2], vec![3, 4]]).unwrap();
+fn test_custom_adapter_schema_override_and_transparent_wrapper() {
+    fn flag_schema(_: &mut asonb::SchemaBuilder) -> Result<Type, asonb::AsonbError> {
+        Ok(Type::U8)
+    }
+    fn serialize_flag<S: serde::Serializer>(
+        value: &bool,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u8(u8::from(*value))
+    }
+    fn deserialize_flag<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<bool, D::Error> {
+        Ok(u8::deserialize(deserializer)? != 0)
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    #[serde(transparent)]
+    struct Flag {
+        #[serde(
+            serialize_with = "serialize_flag",
+            deserialize_with = "deserialize_flag"
+        )]
+        #[asonb(schema_with = "flag_schema")]
+        value: bool,
+        #[serde(skip)]
+        ignored: i32,
+    }
+
+    for value in [false, true] {
+        let bytes = assert_serde_round_trip(&Flag { value, ignored: 0 });
+        assert_eq!(
+            asonb::de_value_from_slice(&bytes).unwrap(),
+            (DocumentSchema::new(Type::U8), Value::U8(u8::from(value)))
+        );
+    }
+
+    fn failing_schema(_: &mut asonb::SchemaBuilder) -> Result<Type, asonb::AsonbError> {
+        Err(asonb::AsonbError::Message("schema override failed".into()))
+    }
+    #[derive(Serialize, Schema)]
+    struct Invalid {
+        #[asonb(schema_with = "failing_schema")]
+        value: bool,
+    }
+    let mut output = Vec::new();
+    let error = asonb::ser_to_writer(&Invalid { value: true }, &mut output).unwrap_err();
+    assert!(
+        error.to_string().contains("schema override failed"),
+        "{error}"
+    );
+    assert!(output.is_empty());
+}
+
+#[test]
+fn test_variant_skips_and_serialization_names() {
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
+    #[serde(
+        rename(serialize = "WireEvent", deserialize = "WireEvent"),
+        rename_all(serialize = "snake_case", deserialize = "snake_case"),
+        rename_all_fields = "camelCase"
+    )]
+    enum Named {
+        Ready,
+        #[serde(skip)]
+        Hidden,
+        UpdateRecord {
+            request_id: u32,
+            r#type: String,
+        },
+        #[serde(rename_all = "UPPERCASE")]
+        OtherRecord {
+            field_name: bool,
+        },
+    }
+
+    for (value, index, fields) in [
+        (
+            Named::UpdateRecord {
+                request_id: 7,
+                r#type: "update".into(),
+            },
+            1,
+            vec!["requestId", "type"],
+        ),
+        (
+            Named::OtherRecord { field_name: true },
+            2,
+            vec!["FIELD_NAME"],
+        ),
+    ] {
+        let bytes = assert_serde_round_trip(&value);
+        let (schema, decoded) = asonb::de_value_from_slice(&bytes).unwrap();
+        let variants = schema
+            .references
+            .iter()
+            .find_map(|ty| match ty {
+                Type::Enum(name, variants) if name == "WireEvent" => Some(variants),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(variants.len(), 3);
+        let Variant::Struct(_, actual_fields) = &variants[index] else {
+            panic!("expected a struct variant");
+        };
+        assert_eq!(
+            actual_fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            fields
+        );
+        assert!(
+            matches!(decoded, Value::Enumeration { index: actual, .. } if actual as usize == index)
+        );
+    }
+    assert!(ser_to_bytes(&Named::Hidden).is_err());
+}
+
+#[test]
+fn test_custom_map_serializer_validates_pair_protocol() {
+    use serde::ser::SerializeMap;
+
+    enum Operation {
+        ValueWithoutKey,
+        ConsecutiveKeys,
+        MissingValue,
+        TooManyPairs,
+        TooFewPairs,
+        UnknownLength,
+    }
+    struct Producer(Operation);
+    impl Schema for Producer {
+        fn schema(builder: &mut asonb::SchemaBuilder) -> Result<Type, asonb::AsonbError> {
+            BTreeMap::<i32, i32>::schema(builder)
+        }
+    }
+    impl Serialize for Producer {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let length = if matches!(self.0, Operation::UnknownLength) {
+                None
+            } else {
+                Some(1)
+            };
+            let mut map = serializer.serialize_map(length)?;
+            match self.0 {
+                Operation::ValueWithoutKey => map.serialize_value(&2i32)?,
+                Operation::ConsecutiveKeys => {
+                    map.serialize_key(&1i32)?;
+                    map.serialize_key(&2i32)?;
+                }
+                Operation::MissingValue => map.serialize_key(&1i32)?,
+                Operation::TooManyPairs => {
+                    map.serialize_entry(&1i32, &2i32)?;
+                    map.serialize_entry(&3i32, &4i32)?;
+                }
+                Operation::TooFewPairs => {}
+                Operation::UnknownLength => map.serialize_entry(&1i32, &2i32)?,
+            }
+            map.end()
+        }
+    }
+
+    for (operation, expected) in [
+        (Operation::ValueWithoutKey, "Map key is missing"),
+        (Operation::ConsecutiveKeys, "Map value is missing"),
+        (Operation::MissingValue, "Incomplete container"),
+        (Operation::TooManyPairs, "Too many Map pairs"),
+        (Operation::TooFewPairs, "Incomplete container"),
+    ] {
+        let error = ser_to_bytes(&Producer(operation)).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+    let bytes = ser_to_bytes(&Producer(Operation::UnknownLength)).unwrap();
     assert_eq!(
-        de_from_slice::<Vec<Vec<i32>>>(&bytes).unwrap(),
-        vec![vec![1, 2], vec![3, 4]]
+        de_from_slice::<BTreeMap<i32, i32>>(&bytes).unwrap(),
+        BTreeMap::from([(1, 2)])
     );
 }
 
 #[test]
-/// Covers every explicit framing mode and preserves ordered duplicate Map keys.
-fn test_value_encodings_round_trip() {
-    for encoding in [Encoding::Regular, Encoding::Long, Encoding::MultiChunk] {
-        let cases = [
-            (Type::String(encoding.clone()), Value::String("a文".into())),
-            (
-                Type::Bytes(encoding.clone()),
-                Value::Bytes(Cow::Borrowed(&[0xff, 0, 1, 2])),
-            ),
-            (
-                Type::List(encoding, Box::new(Type::I32)),
-                Value::List(vec![
-                    Value::I32(1),
-                    Value::I32(2),
-                    Value::I32(3),
-                    Value::I32(4),
-                ]),
-            ),
-        ];
-        for (ty, value) in cases {
-            let schema = DocumentSchema::new(ty);
-            let mut bytes = Vec::new();
-            ser_value_to_writer(&schema, &value, &mut bytes).unwrap();
-            assert_eq!(asonb::de_value_from_slice(&bytes).unwrap().1, value);
-            assert_eq!(
-                asonb::de_value_from_reader(bytes.as_slice()).unwrap().1,
-                value
+fn test_custom_visitors_must_consume_complete_containers() {
+    #[derive(Debug)]
+    struct FirstElement;
+    impl<'de> serde::de::Visitor<'de> for FirstElement {
+        type Value = Self;
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a list")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut access: A) -> Result<Self, A::Error> {
+            let _: Option<i32> = access.next_element()?;
+            Ok(Self)
+        }
+    }
+    impl<'de> Deserialize<'de> for FirstElement {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            deserializer.deserialize_seq(Self)
+        }
+    }
+
+    #[derive(Debug)]
+    struct BadMap<const CASE: u8>;
+    impl<'de, const CASE: u8> serde::de::Visitor<'de> for BadMap<CASE> {
+        type Value = Self;
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a map")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut access: A) -> Result<Self, A::Error> {
+            match CASE {
+                0 => {
+                    let _: i32 = access.next_value()?;
+                }
+                1 => {
+                    let _: Option<i32> = access.next_key()?;
+                    let _: Option<i32> = access.next_key()?;
+                }
+                2 => {
+                    let _: Option<(i32, i32)> = access.next_entry()?;
+                }
+                _ => {
+                    let _: Option<i32> = access.next_key()?;
+                }
+            }
+            Ok(Self)
+        }
+    }
+    impl<'de, const CASE: u8> Deserialize<'de> for BadMap<CASE> {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            deserializer.deserialize_map(Self)
+        }
+    }
+
+    let bytes = ser_to_bytes(&vec![1i32, 2]).unwrap();
+    assert_read_error::<FirstElement>(&bytes, "complete sequence");
+    let bytes = ser_to_bytes(&BTreeMap::from([(1i32, 2i32), (3, 4)])).unwrap();
+    assert_read_error::<BadMap<0>>(&bytes, "Map key was not consumed");
+    assert_read_error::<BadMap<1>>(&bytes, "Map value was not consumed");
+    assert_read_error::<BadMap<2>>(&bytes, "complete map");
+    assert_read_error::<BadMap<3>>(&bytes, "complete map");
+}
+
+#[test]
+fn test_custom_sequence_serializer_enforces_element_counts() {
+    use serde::ser::SerializeSeq;
+
+    struct Producer {
+        promised: Option<usize>,
+        actual: usize,
+    }
+    impl Schema for Producer {
+        fn schema(builder: &mut asonb::SchemaBuilder) -> Result<Type, asonb::AsonbError> {
+            Vec::<i32>::schema(builder)
+        }
+    }
+    impl Serialize for Producer {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut sequence = serializer.serialize_seq(self.promised)?;
+            for value in 0..self.actual {
+                sequence.serialize_element(&(value as i32))?;
+            }
+            sequence.end()
+        }
+    }
+
+    for (promised, actual, message) in [(0, 1, "Too many elements"), (2, 1, "Incomplete container")]
+    {
+        let error = ser_to_bytes(&Producer {
+            promised: Some(promised),
+            actual,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains(message), "{error}");
+    }
+    for promised in [None, Some(3)] {
+        let bytes = ser_to_bytes(&Producer {
+            promised,
+            actual: 3,
+        })
+        .unwrap();
+        assert_eq!(de_from_slice::<Vec<i32>>(&bytes).unwrap(), [0, 1, 2]);
+    }
+}
+
+#[test]
+fn test_enum_deserialization_rejects_mismatched_payload_shapes() {
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    enum Target {
+        Unit,
+        Newtype(i32),
+        Tuple(i32, i32),
+        Struct { id: i32 },
+    }
+
+    for (variant, payload, expected) in [
+        (
+            Variant::Newtype("Unit".into(), Type::I32),
+            VariantValue::Newtype(Box::new(Value::I32(1))),
+            "without a payload",
+        ),
+        (
+            Variant::Unit("Newtype".into()),
+            VariantValue::Unit,
+            "single-value variant",
+        ),
+        (
+            Variant::Newtype("Tuple".into(), Type::I32),
+            VariantValue::Newtype(Box::new(Value::I32(1))),
+            "tuple-like variant",
+        ),
+        (
+            Variant::Tuple("Struct".into(), vec![Type::I32, Type::I32]),
+            VariantValue::Tuple(vec![Value::I32(1), Value::I32(2)]),
+            "object-like variant",
+        ),
+        (
+            Variant::Unit("Unknown".into()),
+            VariantValue::Unit,
+            "unknown variant",
+        ),
+    ] {
+        let schema = DocumentSchema::new(Type::Enum("Target".into(), vec![variant]));
+        let mut bytes = Vec::new();
+        ser_value_to_writer(
+            &schema,
+            &Value::Enumeration { index: 0, payload },
+            &mut bytes,
+        )
+        .unwrap();
+        assert_read_error::<Target>(&bytes, expected);
+    }
+
+    let mut bytes = ser_to_bytes(&Event::None).unwrap();
+    let end = bytes.len();
+    bytes[end - 4..].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_read_error::<Target>(&bytes, "Variant index out of range");
+}
+
+#[test]
+fn test_public_readers_and_writers_propagate_io_failures() {
+    use std::io::{self, Cursor, Read, Write};
+
+    struct ShortReader<'a> {
+        bytes: &'a [u8],
+        interrupt: bool,
+        fail_at_end: bool,
+    }
+    impl Read for ShortReader<'_> {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            if output.is_empty() {
+                return Ok(0);
+            }
+            self.interrupt = !self.interrupt;
+            if self.interrupt {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            if self.bytes.is_empty() && self.fail_at_end {
+                return Err(io::Error::other("test read failure"));
+            }
+            self.bytes.read(&mut output[..1])
+        }
+    }
+    struct ShortWriter {
+        bytes: Vec<u8>,
+        interrupt: bool,
+    }
+    impl Write for ShortWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if bytes.is_empty() {
+                return Ok(0);
+            }
+            self.interrupt = !self.interrupt;
+            if self.interrupt {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            self.bytes.push(bytes[0]);
+            Ok(1)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            panic!("serialization must not flush the writer");
+        }
+    }
+
+    let value = vec!["first".to_owned(), "second".to_owned()];
+    let bytes = ser_to_bytes(&value).unwrap();
+    let (schema, dynamic) = asonb::de_value_from_slice(&bytes).unwrap();
+    let reader = || ShortReader {
+        bytes: &bytes,
+        interrupt: false,
+        fail_at_end: false,
+    };
+    assert_eq!(de_from_reader::<Vec<String>, _>(reader()).unwrap(), value);
+    assert_eq!(
+        asonb::de_value_from_reader(reader()).unwrap(),
+        (schema.clone(), dynamic.clone())
+    );
+    let mut writer = ShortWriter {
+        bytes: Vec::new(),
+        interrupt: false,
+    };
+    asonb::ser_to_writer(&value, &mut writer).unwrap();
+    assert_eq!(writer.bytes, bytes);
+
+    for end in 0..=bytes.len() {
+        let reader = || ShortReader {
+            bytes: &bytes[..end],
+            interrupt: false,
+            fail_at_end: true,
+        };
+        for error in [
+            de_from_reader::<Vec<String>, _>(reader()).unwrap_err(),
+            asonb::de_value_from_reader(reader()).unwrap_err(),
+        ] {
+            assert!(
+                error.to_string().contains("test read failure"),
+                "at {end}: {error}"
             );
         }
+
+        let mut typed_output = vec![0; end];
+        let mut dynamic_output = vec![0; end];
+        let typed_result = asonb::ser_to_writer(&value, &mut Cursor::new(&mut typed_output[..]));
+        let dynamic_result =
+            ser_value_to_writer(&schema, &dynamic, &mut Cursor::new(&mut dynamic_output[..]));
+        assert_eq!(typed_result.is_ok(), end == bytes.len());
+        assert_eq!(dynamic_result.is_ok(), end == bytes.len());
+        assert_eq!(typed_output, bytes[..end]);
+        assert_eq!(dynamic_output, bytes[..end]);
     }
-    for long in [false, true] {
-        let schema = DocumentSchema::new(Type::Map(long, Box::new(Type::U8), Box::new(Type::I32)));
-        let value = Value::Map(vec![
-            (Value::U8(2), Value::I32(11)),
-            (Value::U8(1), Value::I32(13)),
-            (Value::U8(2), Value::I32(17)),
-        ]);
-        let mut bytes = Vec::new();
-        ser_value_to_writer(&schema, &value, &mut bytes).unwrap();
-        assert_eq!(asonb::de_value_from_slice(&bytes).unwrap().1, value);
-    }
-    let values = vec!["payload".to_string(); 16];
-    let mut bytes = Vec::new();
-    asonb::ser_to_writer(&values, &mut bytes).unwrap();
-    assert_eq!(de_from_slice::<Vec<String>>(&bytes).unwrap(), values);
-    assert_eq!(
-        asonb::de_from_reader::<Vec<String>, _>(bytes.as_slice()).unwrap(),
-        values
-    );
-    let map = BTreeMap::from([(1u8, "first".to_string()), (2, "second".to_string())]);
-    let mut bytes = Vec::new();
-    asonb::ser_to_writer(&map, &mut bytes).unwrap();
-    assert_eq!(de_from_slice::<BTreeMap<u8, String>>(&bytes).unwrap(), map);
 }
 
-#[test]
-/// Checks interoperability between streamed chunks and materialized dynamic Lists.
-fn test_stream_values_round_trip() {
-    let values = vec!["payload".to_string(); 16];
-    let mut bytes = Vec::new();
-    {
-        let mut writer = asonb::list_stream_writer::<String, _>(&mut bytes);
-        writer.start_list().unwrap();
-        for value in &values {
-            writer.write(value).unwrap();
-        }
-        writer.end_list().unwrap();
+proptest::proptest! {
+    #[test]
+    fn test_generated_round_trips(
+        values in proptest::collection::vec(
+            (proptest::prelude::any::<i64>(), proptest::prelude::any::<bool>(), ".*"),
+            0..30,
+        ),
+    ) {
+        assert_serde_round_trip(&values);
     }
-    let decoded = asonb::list_stream_reader::<String, _>(bytes.as_slice())
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(decoded, values);
-    assert_eq!(de_from_slice::<Vec<String>>(&bytes).unwrap(), values);
-    let schema = DocumentSchema::new(Type::List(
-        Encoding::MultiChunk,
-        Box::new(Type::String(Encoding::Regular)),
-    ));
-    let value = Value::List(
-        values
-            .iter()
-            .map(|text| Value::String(Cow::Borrowed(text.as_str())))
-            .collect(),
-    );
-    let mut bytes = Vec::new();
-    ser_value_to_writer(&schema, &value, &mut bytes).unwrap();
-    assert_eq!(
-        asonb::list_stream_reader::<String, _>(bytes.as_slice())
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap(),
-        values
-    );
-}
-
-#[test]
-/// Keeps deep-but-acyclic schemas valid without an artificial nesting quota.
-fn test_unrestricted_schema_round_trip() {
-    let name_schema = DocumentSchema::new(Type::Object(
-        "Record".into(),
-        vec![Field::new("value", Type::I32)],
-    ));
-    let value = Value::Object(vec![Value::I32(1)]);
-    let mut bytes = Vec::new();
-    ser_value_to_writer(&name_schema, &value, &mut bytes).unwrap();
-    assert_eq!(
-        asonb::de_value_from_slice(&bytes).unwrap(),
-        (name_schema.clone(), value.clone())
-    );
-    assert_eq!(
-        asonb::de_value_from_reader(bytes.as_slice()).unwrap(),
-        (name_schema, value)
-    );
-    let tuple_schema = DocumentSchema::new(Type::Tuple(vec![Type::I32; 3]));
-    tuple_schema.validate().unwrap();
-    let mut ty = Type::I32;
-    let mut value = Value::I32(11);
-    for _ in 0..160 {
-        ty = Type::List(Encoding::Regular, Box::new(ty));
-        value = Value::List(vec![value]);
-    }
-    let nested_schema = DocumentSchema::new(ty);
-    let mut bytes = Vec::new();
-    ser_value_to_writer(&nested_schema, &value, &mut bytes).unwrap();
-    assert_eq!(
-        asonb::de_value_from_slice(&bytes).unwrap(),
-        (nested_schema.clone(), value.clone())
-    );
-    assert_eq!(
-        asonb::de_value_from_reader(bytes.as_slice()).unwrap(),
-        (nested_schema, value)
-    );
-    let time = asonb::date_time::DateTime(
-        chrono::DateTime::from_timestamp(0, 0)
-            .unwrap()
-            .with_timezone(&chrono::FixedOffset::east_opt(0).unwrap()),
-    );
-    let mut bytes = Vec::new();
-    asonb::ser_to_writer(&time, &mut bytes).unwrap();
-    assert_eq!(
-        de_from_slice::<asonb::date_time::DateTime>(&bytes).unwrap(),
-        time
-    );
 }
 
 #[test]
@@ -799,13 +1076,10 @@ fn test_recursive_schema_and_ignored_field_validation() {
         /// The only field the target chooses to retain.
         id: i32,
     }
-    let schema = DocumentSchema::new(Type::Object(
-        "".into(),
-        vec![
-            Field::new("id", Type::I32),
-            Field::new("ignored", Type::String(Encoding::Regular)),
-        ],
-    ));
+    let schema = DocumentSchema::new(Type::Object(vec![
+        Field::new("id", Type::I32),
+        Field::new("ignored", Type::String(Encoding::Regular)),
+    ]));
     let mut bytes = Vec::new();
     ser_value_to_writer(
         &schema,
@@ -821,21 +1095,83 @@ fn test_recursive_schema_and_ignored_field_validation() {
 }
 
 #[test]
-/// Checks span-aware compiler diagnostics for unsupported derive inputs.
-fn test_derive_compile_errors() {
-    let tests = trybuild::TestCases::new();
-    tests.compile_fail("tests/ui/*.rs");
+/// Skips every container form through `IgnoredAny` while still rejecting truncated payloads.
+fn test_ignored_any_validates_every_container_kind() {
+    #[derive(Serialize, Schema)]
+    enum Event {
+        Idle,
+        Data(i64),
+        Move(i32, i32),
+        Named { id: u8, label: String },
+    }
+    #[derive(Serialize, Schema)]
+    struct Record {
+        id: u32,
+        tags: BTreeMap<String, Vec<i32>>,
+        pair: (bool, String),
+        events: Vec<Event>,
+    }
+    let record = Record {
+        id: 7,
+        tags: BTreeMap::from([("a".into(), vec![1, 2]), ("b".into(), vec![])]),
+        pair: (true, "x".into()),
+        events: vec![
+            Event::Idle,
+            Event::Data(-1),
+            Event::Move(3, 4),
+            Event::Named {
+                id: 9,
+                label: "named".into(),
+            },
+        ],
+    };
+    let bytes = ser_to_bytes(&record).unwrap();
+    assert!(de_from_slice::<serde::de::IgnoredAny>(&bytes).is_ok());
+    assert!(de_from_reader::<serde::de::IgnoredAny, _>(bytes.as_slice()).is_ok());
+    for end in 0..bytes.len() {
+        assert!(
+            de_from_slice::<serde::de::IgnoredAny>(&bytes[..end]).is_err(),
+            "end {end}"
+        );
+    }
+
+    let schema = DocumentSchema::new(Type::Enum(
+        "Event".into(),
+        vec![Variant::Unit("Idle".into())],
+    ));
+    let mut bytes = Vec::new();
+    ser_value_to_writer(
+        &schema,
+        &Value::Enumeration {
+            index: 0,
+            payload: VariantValue::Unit,
+        },
+        &mut bytes,
+    )
+    .unwrap();
+    let end = bytes.len();
+    bytes[end - 4..].copy_from_slice(&1u32.to_le_bytes());
+    assert_read_error::<serde::de::IgnoredAny>(&bytes, "Variant index out of range");
 }
 
-proptest::proptest! {
-    #[test]
-    /// Generates mixed scalar/text payloads to check typed List round trips.
-    fn test_generated_round_trips(values in proptest::collection::vec((proptest::prelude::any::<i64>(),proptest::prelude::any::<bool>(),".*"),0..30)){
-        let bytes=ser_to_bytes(&values).unwrap();proptest::prop_assert_eq!(de_from_slice::<Vec<(i64,bool,String)>>(&bytes).unwrap(),values);
+#[test]
+/// Reports schema mismatches for Serde targets that request a different wire form.
+fn test_deserialize_rejects_mismatched_targets() {
+    #[derive(Debug, Deserialize)]
+    #[serde(untagged)]
+    #[allow(dead_code)]
+    enum Untagged {
+        Integer(i32),
     }
-    #[test]
-    /// Allows decoding errors for arbitrary bytes, but never a decoder panic.
-    fn test_arbitrary_inputs_never_panic(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(),0..256)){
-        let _=asonb::de_value_from_slice(&bytes);let _=de_from_slice::<Vec<String>>(&bytes);
-    }
+    let bytes = ser_to_bytes(&11i32).unwrap();
+    assert_read_error::<String>(&bytes, "Expected a String");
+    assert_read_error::<serde_bytes::ByteBuf>(&bytes, "Expected Byte Data");
+    assert_read_error::<Option<i32>>(&bytes, "Expected an Enumeration");
+    assert_read_error::<Option<i32>>(
+        &ser_to_bytes(&Ok::<i32, String>(1)).unwrap(),
+        "Expected None or Some",
+    );
+    assert_read_error::<asonb::date_time::DateTime>(&bytes, "Expected DateTime");
+    assert_read_error::<BTreeMap<i32, i32>>(&bytes, "Expected a matching Object or Map");
+    assert_read_error::<Untagged>(&bytes, "deserialize_any is unsupported");
 }

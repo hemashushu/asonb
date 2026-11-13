@@ -1,0 +1,19 @@
+error: unsupported ASONB attribute; use schema_with = "path"
+ --> tests/ui/invalid_attributes.rs:8:9
+  |
+8 | #[asonb(unknown = "value")]
+  |         ^^^^^^^
+
+error: unsupported rename_all rule
+  --> tests/ui/invalid_attributes.rs:13:10
+   |
+13 | #[derive(asonb::Schema)]
+   |          ^^^^^^^^^^^^^
+   |
+   = note: this error originates in the derive macro `asonb::Schema` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: unexpected token
+  --> tests/ui/invalid_attributes.rs:21:27
+   |
+21 |     #[asonb(schema_with = "not a path")]
+   |                           ^^^^^^^^^^^^

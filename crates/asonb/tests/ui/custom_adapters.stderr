@@ -1,0 +1,13 @@
+error: custom serialization requires #[asonb(schema_with = "path")]
+  --> tests/ui/custom_adapters.rs:9:5
+   |
+ 9 | /     #[serde(serialize_with = "custom_serializer")]
+10 | |     value: i32,
+   | |______________^
+
+error: the asonb::array adapter requires a fixed-size array field
+  --> tests/ui/custom_adapters.rs:15:5
+   |
+15 | /     #[serde(with = "asonb::array")]
+16 | |     values: Vec<i32>,
+   | |____________________^

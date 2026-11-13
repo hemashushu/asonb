@@ -3,3 +3,21 @@ error: this Serde representation has no fixed ASONB schema
    |
 12 |     #[serde(skip_serializing_if = "Option::is_none")]
    |             ^^^^^^^^^^^^^^^^^^^
+
+error: this Serde representation has no fixed ASONB schema
+  --> tests/ui/dynamic_schema.rs:18:9
+   |
+18 | #[serde(untagged)]
+   |         ^^^^^^^^
+
+error: this Serde representation has no fixed ASONB schema
+  --> tests/ui/dynamic_schema.rs:25:9
+   |
+25 | #[serde(tag = "kind")]
+   |         ^^^
+
+error: this Serde representation has no fixed ASONB schema
+  --> tests/ui/dynamic_schema.rs:31:9
+   |
+31 | #[serde(content = "payload")]
+   |         ^^^^^^^

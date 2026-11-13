@@ -13,5 +13,25 @@ struct Dynamic {
     /// Cannot be assigned one fixed Object position for all serialized values.
     value: Option<i32>,
 }
+
+#[derive(asonb::Schema)]
+#[serde(untagged)]
+enum Untagged {
+    Integer(i32),
+    Text(String),
+}
+
+#[derive(asonb::Schema)]
+#[serde(tag = "kind")]
+enum InternallyTagged {
+    Ready,
+}
+
+#[derive(asonb::Schema)]
+#[serde(content = "payload")]
+enum ContentTagged {
+    Value(i32),
+}
+
 /// No runtime behavior is needed; deriving this type must fail during compilation.
 fn main() {}

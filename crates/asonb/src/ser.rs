@@ -10,8 +10,10 @@
 
 use crate::{
     AsonbError, DocumentSchema, Encoding, Field, Schema, Type, Value, Variant,
+    binary::write_length,
     binary::{HEADER, ValueBuffer, write_all, write_u32},
-    value::{payload_type, write_length, write_value},
+    schema::payload_type,
+    value::VariantValue,
 };
 use serde::{Serialize, ser};
 use std::{io::Write, marker::PhantomData};
@@ -55,6 +57,33 @@ pub fn ser_to_bytes<T: Serialize + Schema + ?Sized>(value: &T) -> Result<Vec<u8>
     let mut bytes = Vec::new();
     ser_to_writer(value, &mut bytes)?;
     Ok(bytes)
+}
+
+/// Writes a complete document using a caller-selected schema and dynamic value.
+///
+/// `schema` supplies types, field order, and framing. `value` must match it
+/// exactly; numeric widths are not coerced. `writer` receives the header, schema,
+/// and payload, but is not flushed. Invalid schemas are rejected before writing.
+/// Value mismatches and I/O failures can leave partial output: arbitrary writers
+/// cannot be rolled back. There are no library-imposed size or depth quotas.
+///
+/// ```
+/// use asonb::{DocumentSchema, Encoding, Type, Value};
+/// let schema = DocumentSchema::new(Type::String(Encoding::Long));
+/// let mut bytes = Vec::new();
+/// asonb::ser_value_to_writer(&schema, &Value::String("hello".into()), &mut bytes)?;
+/// assert_eq!(asonb::de_value_from_slice(&bytes)?.1, Value::String("hello".into()));
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
+pub fn ser_value_to_writer(
+    schema: &DocumentSchema,
+    value: &Value<'_>,
+    writer: &mut impl Write,
+) -> Result<(), AsonbError> {
+    schema.validate()?;
+    write_all(writer, &HEADER)?;
+    schema.write(writer)?;
+    write_value(writer, schema, &schema.root, value)
 }
 
 /// Creates an idle writer for a MultiChunk root List of `T` values.
@@ -322,7 +351,7 @@ impl<'a, 'w, W: Write> Compound<'a, 'w, W> {
                 }
                 Kind::Tuple(types)
             }
-            Type::Object(_, fields) => {
+            Type::Object(fields) => {
                 if length != Some(fields.len()) {
                     return Err(AsonbError::Message(
                         "Object field count does not match schema.".into(),
@@ -853,6 +882,188 @@ impl<W: Write, T: Schema> ListStreamWriter<'_, W, T> {
         self.state = StreamState::Finished;
         Ok(())
     }
+}
+
+/// Checks a dynamic value against its resolved type while emitting its payload.
+/// Container headers may already be written when a later child fails validation.
+pub(crate) fn write_value(
+    writer: &mut impl Write,
+    schema: &DocumentSchema,
+    ty: &Type,
+    value: &Value<'_>,
+) -> Result<(), AsonbError> {
+    let ty = schema.resolve(ty.clone())?;
+    /// Shares exact-width integer writing without introducing numeric coercions.
+    macro_rules! number {
+        ($variant:ident,$value:expr) => {
+            if let Value::$variant(value) = $value {
+                return write_all(writer, &value.to_le_bytes());
+            }
+        };
+    }
+    match &ty {
+        Type::I8 => number!(I8, value),
+        Type::I16 => number!(I16, value),
+        Type::I32 => number!(I32, value),
+        Type::I64 => number!(I64, value),
+        Type::U8 => number!(U8, value),
+        Type::U16 => number!(U16, value),
+        Type::U32 => number!(U32, value),
+        Type::U64 => number!(U64, value),
+        Type::F32 => {
+            if let Value::F32(value) = value {
+                // ASONB writers use a stable NaN representation, but retain
+                // ordinary values, infinities, and signed zero exactly.
+                let bits = if value.is_nan() {
+                    0x7fc00000
+                } else {
+                    value.to_bits()
+                };
+                return write_all(writer, &bits.to_le_bytes());
+            }
+        }
+        Type::F64 => {
+            if let Value::F64(value) = value {
+                let bits = if value.is_nan() {
+                    0x7ff8000000000000
+                } else {
+                    value.to_bits()
+                };
+                return write_all(writer, &bits.to_le_bytes());
+            }
+        }
+        Type::Bool => {
+            if let Value::Bool(value) = value {
+                return write_all(writer, &[u8::from(*value)]);
+            }
+        }
+        Type::Char => {
+            if let Value::Char(value) = value {
+                return write_all(writer, &(*value as u32).to_le_bytes());
+            }
+        }
+        Type::DateTime => {
+            if let Value::DateTime(seconds) = value {
+                return write_all(writer, &seconds.to_le_bytes());
+            }
+        }
+        Type::String(encoding) | Type::Bytes(encoding) => {
+            let bytes: &[u8] = match (&ty, value) {
+                (Type::String(_), Value::String(text)) => text.as_bytes(),
+                (Type::Bytes(_), Value::Bytes(bytes)) => bytes,
+                _ => {
+                    return Err(AsonbError::Message(
+                        "String or byte-data value does not match schema.".into(),
+                    ));
+                }
+            };
+            if *encoding == Encoding::MultiChunk && bytes.is_empty() {
+                return write_u32(writer, 0);
+            }
+            // A materialized blob is emitted as one chunk plus a terminator.
+            // Empty blobs need only the terminator, handled above.
+            write_length(writer, encoding, bytes.len() as u64)?;
+            write_all(writer, bytes)?;
+            if *encoding == Encoding::MultiChunk {
+                write_u32(writer, 0)?;
+            }
+            return Ok(());
+        }
+        Type::List(encoding, item) => {
+            if let Value::List(values) = value {
+                if *encoding == Encoding::MultiChunk && values.is_empty() {
+                    return write_u32(writer, 0);
+                }
+                write_length(writer, encoding, values.len() as u64)?;
+                for value in values {
+                    write_value(writer, schema, item, value)?;
+                }
+                if *encoding == Encoding::MultiChunk {
+                    write_u32(writer, 0)?;
+                }
+                return Ok(());
+            }
+        }
+        Type::Map(long, key, item) => {
+            if let Value::Map(values) = value {
+                write_length(
+                    writer,
+                    &if *long {
+                        Encoding::Long
+                    } else {
+                        Encoding::Regular
+                    },
+                    values.len() as u64,
+                )?;
+                for (key_value, value) in values {
+                    write_value(writer, schema, key, key_value)?;
+                    write_value(writer, schema, item, value)?;
+                }
+                return Ok(());
+            }
+        }
+        Type::Tuple(types) => {
+            if let Value::Tuple(values) = value {
+                if types.len() != values.len() {
+                    return Err(AsonbError::Message("Tuple arity mismatch.".into()));
+                }
+                for (ty, value) in types.iter().zip(values) {
+                    write_value(writer, schema, ty, value)?;
+                }
+                return Ok(());
+            }
+        }
+        Type::Object(fields) => {
+            if let Value::Object(values) = value {
+                if fields.len() != values.len() {
+                    return Err(AsonbError::Message("Object field count mismatch.".into()));
+                }
+                for (field, value) in fields.iter().zip(values) {
+                    write_value(writer, schema, &field.ty, value)?;
+                }
+                return Ok(());
+            }
+        }
+        Type::Enum(_, variants) => {
+            if let Value::Enumeration { index, payload } = value {
+                let variant = variants
+                    .get(*index as usize)
+                    .ok_or_else(|| AsonbError::Message("Variant index out of range.".into()))?;
+                let (types, values): (Vec<&Type>, Vec<&Value>) = match (variant, payload) {
+                    (Variant::Unit(_), VariantValue::Unit) => (vec![], vec![]),
+                    (Variant::Newtype(_, ty), VariantValue::Newtype(value)) => {
+                        (vec![ty], vec![value.as_ref()])
+                    }
+                    (Variant::Tuple(_, types), VariantValue::Tuple(values)) => {
+                        (types.iter().collect(), values.iter().collect())
+                    }
+                    (Variant::Struct(_, fields), VariantValue::Struct(values)) => (
+                        fields.iter().map(|field| &field.ty).collect(),
+                        values.iter().collect(),
+                    ),
+                    _ => {
+                        return Err(AsonbError::Message(format!(
+                            "Payload does not match variant \"{}\".",
+                            variant.name()
+                        )));
+                    }
+                };
+                if types.len() != values.len() {
+                    return Err(AsonbError::Message(format!(
+                        "Payload arity mismatch for variant \"{}\".",
+                        variant.name()
+                    )));
+                }
+                write_u32(writer, *index as u64)?;
+                for (ty, value) in types.into_iter().zip(values) {
+                    write_value(writer, schema, ty, value)?;
+                }
+                return Ok(());
+            }
+        }
+        Type::Reference(_) => unreachable!(),
+    }
+    Err(AsonbError::Message(format!("Value does not match {ty:?}.")))
 }
 
 #[cfg(test)]

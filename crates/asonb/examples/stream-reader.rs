@@ -4,42 +4,66 @@
 // the Mozilla Public License version 2.0 and additional exceptions.
 // For more details, see the LICENSE, LICENSE.additional, and CONTRIBUTING files.
 
-//! Reads the binary List produced by the stream-writer example from stdin.
-//! Run the two examples as a pipe. The reader needs Deserialize but not Schema:
-//! type metadata arrives in the document itself.
+//! Build and run this program with this command:
+//!
+//! ```sh
+//! cargo build --examples
+//! cd target/debug/examples
+//! ./stream-writer | ./stream-reader
+//! ```
 
-use serde::Deserialize;
+use asonb::Schema;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, PartialEq, Deserialize)]
-/// The owned record expected from each root List element.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Schema)]
 struct Object {
-    /// Numeric identifier carried in the document's i32 field.
     id: i32,
-    /// Owned text because a stdin reader cannot lend stable input storage.
     name: String,
 }
 
-/// Collects this small demonstration stream and checks both expected records.
-/// A real consumer can process each iterator item immediately instead of
-/// collecting the complete result in memory. Errors propagate to the process.
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let input = std::io::stdin().lock();
-    // collect stops at the explicit List marker, without waiting for stdin EOF.
-    let values = asonb::list_stream_reader::<Object, _>(input)?.collect::<Result<Vec<_>, _>>()?;
+fn main() {
+    let mut input = std::io::stdin().lock();
+    let mut stream_reader = asonb::list_stream_reader::<Object, _>(&mut input).unwrap();
+
+    // Deserialize the first element.
+    let o1: Object = stream_reader.next().unwrap().unwrap();
     assert_eq!(
-        values,
+        o1,
+        Object {
+            id: 11,
+            name: "Alice".to_string()
+        }
+    );
+
+    // Deserialize the second element.
+    let o2: Object = stream_reader.next().unwrap().unwrap();
+    assert_eq!(
+        o2,
+        Object {
+            id: 13,
+            name: "Bob".to_string()
+        }
+    );
+
+    // Deserialize the remaining elements until the end of the list.
+    let mut objs = vec![];
+    for result in stream_reader {
+        objs.push(result.unwrap());
+    }
+
+    assert_eq!(
+        objs,
         vec![
             Object {
-                id: 11,
-                name: "foo".to_owned()
+                id: 17,
+                name: "Charlie".to_string()
             },
             Object {
-                id: 13,
-                name: "bar".to_owned()
+                id: 19,
+                name: "David".to_string()
             }
         ]
     );
-    // Diagnostics stay on stderr so stdout remains usable in a larger pipeline.
-    eprintln!("Streaming deserialization successful!");
-    Ok(())
+
+    println!("Success: received all elements correctly.");
 }

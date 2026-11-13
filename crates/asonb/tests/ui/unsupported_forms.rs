@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Hemashushu <hippospark@gmail.com>, All rights reserved.
+//
+// This Source Code Form is subject to the terms of
+// the Mozilla Public License version 2.0 and additional exceptions.
+// For more details, see the LICENSE, LICENSE.additional, and CONTRIBUTING files.
+
 //! Compile-fail coverage for Rust shapes that the Schema derive cannot encode.
 
 use asonb::Schema;
@@ -25,18 +31,6 @@ struct RGB(
 );
 
 #[derive(Schema)]
-/// Empty tuple-struct syntax is still unsupported.
-struct EmptyTuple();
-
-#[derive(Schema)]
-#[serde(transparent)]
-/// Transparent support is restricted to named structs, not this tuple wrapper.
-struct Transparent(
-    /// A valid scalar cannot bypass the tuple-struct shape check.
-    u32,
-);
-
-#[derive(Schema)]
 /// A tuple-like variant must retain at least two serialized positions.
 enum EmptyVariant {
     /// Empty tuple syntax is not the same as a supported unit variant.
@@ -54,6 +48,26 @@ enum SkippedVariant {
         /// Removed from the schema as well as from serialized values.
         u32,
     ),
+}
+
+#[derive(Schema)]
+union UnsupportedUnion {
+    integer: u32,
+    float: f32,
+}
+
+#[derive(Schema)]
+#[serde(transparent)]
+struct MultipleTransparentFields {
+    first: u32,
+    second: u32,
+}
+
+#[derive(Schema)]
+#[serde(transparent)]
+struct NoTransparentFields {
+    #[serde(skip)]
+    ignored: u32,
 }
 
 /// Only compilation and its diagnostics matter; this program is never run.

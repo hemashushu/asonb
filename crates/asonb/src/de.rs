@@ -11,7 +11,9 @@
 use crate::{
     AsonbError, DocumentSchema, Encoding, Field, Type, Value, Variant,
     binary::{Input, ReaderInput, SliceInput},
-    value::{payload_type, read_blob, read_length, read_value, skip_value},
+    binary::{read_blob, read_length},
+    schema::payload_type,
+    value::VariantValue,
 };
 use serde::{
     Deserialize,
@@ -58,6 +60,56 @@ pub fn de_from_reader<T: de::DeserializeOwned, R: Read>(reader: R) -> Result<T, 
 /// ```
 pub fn de_from_slice<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, AsonbError> {
     read_document(&mut SliceInput::new(bytes))
+}
+
+/// Reads one finite document into its schema and an entirely owned value tree.
+///
+/// `reader` starts at the document header and is consumed by this call. The
+/// returned value has no borrow from the source. Invalid schemas, malformed
+/// payloads, I/O errors, and trailing bytes are rejected. The EOF check may block
+/// on a live source; use [`crate::list_stream_reader`] for pipelines instead.
+///
+/// ```
+/// let bytes = asonb::ser_to_bytes(&42i32)?;
+/// let (schema, value) = asonb::de_value_from_reader(bytes.as_slice())?;
+/// assert_eq!(schema.root, asonb::Type::I32);
+/// assert_eq!(value, asonb::Value::I32(42));
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
+pub fn de_value_from_reader(
+    reader: impl Read,
+) -> Result<(DocumentSchema, Value<'static>), AsonbError> {
+    read_value_document(&mut ReaderInput::new(reader))
+}
+
+/// Reads one complete document, borrowing contiguous string and byte payloads.
+///
+/// `bytes` must contain exactly one document, including its header. Returned
+/// borrows remain valid only while this slice lives. Chunked text and byte data
+/// are joined into owned storage; schemas and container vectors are also owned.
+/// Malformed input and trailing bytes return an error. Numeric values are copied
+/// from little-endian bytes, never viewed through unaligned native references.
+///
+/// ```
+/// use std::borrow::Cow;
+/// let bytes = asonb::ser_to_bytes(&"hello")?;
+/// let (_, value) = asonb::de_value_from_slice(&bytes)?;
+/// assert!(matches!(value, asonb::Value::String(Cow::Borrowed("hello"))));
+/// # Ok::<(), asonb::AsonbError>(())
+/// ```
+pub fn de_value_from_slice(bytes: &[u8]) -> Result<(DocumentSchema, Value<'_>), AsonbError> {
+    read_value_document(&mut SliceInput::new(bytes))
+}
+
+/// Shares header/schema/value/EOF checks for the dynamic [`Value`] readers.
+fn read_value_document<'de>(
+    input: &mut impl Input<'de>,
+) -> Result<(DocumentSchema, Value<'de>), AsonbError> {
+    input.header()?;
+    let schema = DocumentSchema::read(input)?;
+    let value = read_value(input, &schema, &schema.root, true)?;
+    input.finish()?;
+    Ok((schema, value))
 }
 
 /// Opens a MultiChunk root List and returns an iterator of owned `T` elements.
@@ -208,9 +260,9 @@ pub fn value_document_reader<R: Read>(reader: R) -> Result<ValueDocumentReader<R
                     (Some(*item), false, None)
                 }
                 _ => {
-                    let value = read_value(&mut input, &schema, &payload, false)?;
+                    let payload = read_variant_value(&mut input, &schema, &variant)?;
                     input.finish()?;
-                    (None, false, Some(Value::Enum(index, Box::new(value))))
+                    (None, false, Some(Value::Enumeration { index, payload }))
                 }
             }
         }
@@ -344,7 +396,7 @@ impl<'a, 'de, I: Input<'de>> Deserializer<'a, 'de, I> {
         object: bool,
     ) -> Result<V::Value, AsonbError> {
         let mode = match self.ty()? {
-            Type::Object(_, fields) if object => MappingMode::Object(fields),
+            Type::Object(fields) if object => MappingMode::Object(fields),
             Type::Map(long, key, value) if !object => {
                 let count = read_length(
                     self.input,
@@ -896,7 +948,7 @@ impl<R: Read> ValueDocumentReader<R> {
     /// There are no arguments. Only a root `Result` whose selected `Ok` payload
     /// is a MultiChunk List selects this mode; the variant index has already
     /// been consumed. `Result::Err` and other `Ok` payloads are yielded once as
-    /// a whole [`Value::Enum`].
+    /// a whole [`Value::Enumeration`].
     ///
     /// ```
     /// let mut bytes = Vec::new();
@@ -1009,10 +1061,263 @@ impl<T: de::DeserializeOwned, R: Read> Iterator for ListStreamReader<T, R> {
 impl<T: de::DeserializeOwned, R: Read> FusedIterator for ListStreamReader<T, R> {}
 impl<R: Read> FusedIterator for ValueDocumentReader<R> {}
 
+/// Materializes a schema-directed value tree, borrowing leaf bytes when possible.
+/// Only the actual root may use EOF instead of a MultiChunk terminator; children
+/// always receive `false` so a truncated child cannot consume its parent's end.
+pub(crate) fn read_value<'de>(
+    input: &mut impl Input<'de>,
+    schema: &DocumentSchema,
+    ty: &Type,
+    root: bool,
+) -> Result<Value<'de>, AsonbError> {
+    let ty = schema.resolve(ty.clone())?;
+    Ok(match ty {
+        Type::I8 => Value::I8(i8::from_le_bytes(input.exact()?)),
+        Type::I16 => Value::I16(i16::from_le_bytes(input.exact()?)),
+        Type::I32 => Value::I32(i32::from_le_bytes(input.exact()?)),
+        Type::I64 => Value::I64(i64::from_le_bytes(input.exact()?)),
+        Type::U8 => Value::U8(u8::from_le_bytes(input.exact()?)),
+        Type::U16 => Value::U16(u16::from_le_bytes(input.exact()?)),
+        Type::U32 => Value::U32(input.u32()?),
+        Type::U64 => Value::U64(input.u64()?),
+        Type::F32 => Value::F32(f32::from_le_bytes(input.exact()?)),
+        Type::F64 => Value::F64(f64::from_le_bytes(input.exact()?)),
+        Type::Bool => Value::Bool(input.exact::<1>()?[0] != 0),
+        Type::Char => {
+            let offset = input.offset();
+            Value::Char(char::from_u32(input.u32()?).ok_or_else(|| {
+                AsonbError::MessageWithOffset("Invalid Unicode scalar.".into(), offset)
+            })?)
+        }
+        Type::DateTime => {
+            let seconds = i64::from_le_bytes(input.exact()?);
+            Value::DateTime(seconds)
+        }
+        Type::String(encoding) => {
+            let bytes = read_blob(input, &encoding, true, root)?;
+            Value::String(match bytes {
+                Cow::Borrowed(bytes) => Cow::Borrowed(
+                    std::str::from_utf8(bytes)
+                        .map_err(|error| AsonbError::Message(error.to_string()))?,
+                ),
+                Cow::Owned(bytes) => Cow::Owned(
+                    String::from_utf8(bytes)
+                        .map_err(|error| AsonbError::Message(error.to_string()))?,
+                ),
+            })
+        }
+        Type::Bytes(encoding) => {
+            let bytes = read_blob(input, &encoding, false, root)?;
+            Value::Bytes(bytes)
+        }
+        Type::List(encoding, item) => {
+            let mut values = Vec::new();
+            loop {
+                let count = if encoding == Encoding::MultiChunk {
+                    input.chunk(root)? as u64
+                } else {
+                    read_length(input, &encoding)?
+                };
+                if encoding == Encoding::MultiChunk && count == 0 {
+                    break;
+                }
+                // Check the combined count across chunks, not just each chunk.
+                // This is a platform-capacity check rather than a policy quota.
+                let total = (values.len() as u64)
+                    .checked_add(count)
+                    .ok_or_else(|| AsonbError::Message("Container length overflow.".into()))?;
+                value_count::<Value<'de>>(total)?;
+                for _ in 0..count {
+                    let value = read_value(input, schema, &item, false)?;
+                    push_value(&mut values, value)?;
+                }
+                if encoding != Encoding::MultiChunk {
+                    break;
+                }
+            }
+            Value::List(values)
+        }
+        Type::Map(long, key, item) => {
+            let count = read_length(
+                input,
+                &if long {
+                    Encoding::Long
+                } else {
+                    Encoding::Regular
+                },
+            )?;
+            value_count::<(Value<'de>, Value<'de>)>(count)?;
+            let mut values = Vec::new();
+            for _ in 0..count {
+                let pair = (
+                    read_value(input, schema, &key, false)?,
+                    read_value(input, schema, &item, false)?,
+                );
+                push_value(&mut values, pair)?;
+            }
+            Value::Map(values)
+        }
+        Type::Tuple(types) => {
+            let mut values = Vec::new();
+            for ty in types {
+                let value = read_value(input, schema, &ty, false)?;
+                push_value(&mut values, value)?;
+            }
+            Value::Tuple(values)
+        }
+        Type::Object(fields) => {
+            let mut values = Vec::new();
+            for field in fields {
+                let value = read_value(input, schema, &field.ty, false)?;
+                push_value(&mut values, value)?;
+            }
+            Value::Object(values)
+        }
+        Type::Enum(_, variants) => {
+            let index = input.u32()?;
+            let variant = variants.get(index as usize).ok_or_else(|| {
+                AsonbError::MessageWithOffset(
+                    "Variant index out of range.".into(),
+                    input.offset() - 4,
+                )
+            })?;
+            Value::Enumeration {
+                index,
+                payload: read_variant_value(input, schema, variant)?,
+            }
+        }
+        Type::Reference(_) => unreachable!(),
+    })
+}
+
+/// Reads the payload of an already selected variant.
+pub(crate) fn read_variant_value<'de, I: Input<'de>>(
+    input: &mut I,
+    schema: &DocumentSchema,
+    variant: &Variant,
+) -> Result<VariantValue<'de>, AsonbError> {
+    let mut read_all = |types: &mut dyn Iterator<Item = &Type>| {
+        let mut values = Vec::new();
+        for ty in types {
+            let value = read_value(input, schema, ty, false)?;
+            push_value(&mut values, value)?;
+        }
+        Ok::<_, AsonbError>(values)
+    };
+    Ok(match variant {
+        Variant::Unit(_) => VariantValue::Unit,
+        Variant::Newtype(_, ty) => {
+            VariantValue::Newtype(Box::new(read_value(input, schema, ty, false)?))
+        }
+        Variant::Tuple(_, types) => VariantValue::Tuple(read_all(&mut types.iter())?),
+        Variant::Struct(_, fields) => {
+            VariantValue::Struct(read_all(&mut fields.iter().map(|field| &field.ty))?)
+        }
+    })
+}
+
+/// Validate and discard an unwanted field without allocating a value tree.
+/// Leaf payloads still pass through the same scalar/UTF-8 checks as normal
+/// reads, so ignoring a field never accepts malformed input silently.
+pub(crate) fn skip_value<'de>(
+    input: &mut impl Input<'de>,
+    schema: &DocumentSchema,
+    ty: &Type,
+) -> Result<(), AsonbError> {
+    match schema.resolve(ty.clone())? {
+        Type::List(encoding, item) => loop {
+            let count = if encoding == Encoding::MultiChunk {
+                input.chunk(false)? as u64
+            } else {
+                read_length(input, &encoding)?
+            };
+            if encoding == Encoding::MultiChunk && count == 0 {
+                break;
+            }
+            for _ in 0..count {
+                skip_value(input, schema, &item)?;
+            }
+            if encoding != Encoding::MultiChunk {
+                break;
+            }
+        },
+        Type::Map(long, key, value) => {
+            let count = read_length(
+                input,
+                &if long {
+                    Encoding::Long
+                } else {
+                    Encoding::Regular
+                },
+            )?;
+            for _ in 0..count {
+                skip_value(input, schema, &key)?;
+                skip_value(input, schema, &value)?;
+            }
+        }
+        Type::Tuple(types) => {
+            for ty in types {
+                skip_value(input, schema, &ty)?;
+            }
+        }
+        Type::Object(fields) => {
+            for field in fields {
+                skip_value(input, schema, &field.ty)?;
+            }
+        }
+        Type::Enum(_, variants) => {
+            let index = input.u32()?;
+            let variant = variants.get(index as usize).ok_or_else(|| {
+                AsonbError::MessageWithOffset(
+                    "Variant index out of range.".into(),
+                    input.offset() - 4,
+                )
+            })?;
+            skip_value(input, schema, &payload_type(variant))?;
+        }
+        ty => {
+            read_value(input, schema, &ty, false)?;
+        }
+    }
+    Ok(())
+}
+
+/// Check only the platform's representable Vec size, without imposing a quota.
+fn value_count<T>(count: u64) -> Result<usize, AsonbError> {
+    let count = usize::try_from(count)
+        .map_err(|_| AsonbError::Message("Container length does not fit usize.".into()))?;
+    let bytes = count
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or_else(|| AsonbError::Message("Container allocation size overflow.".into()))?;
+    if bytes > isize::MAX as usize {
+        return Err(AsonbError::Message(
+            "Container allocation exceeds platform capacity.".into(),
+        ));
+    }
+    Ok(count)
+}
+
+/// Grows a materialized container fallibly before moving the next value into it.
+fn push_value<T>(values: &mut Vec<T>, value: T) -> Result<(), AsonbError> {
+    values
+        .try_reserve(1)
+        .map_err(|error| AsonbError::Message(error.to_string()))?;
+    values.push(value);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ser::{list_stream_writer, ser_to_bytes};
+
+    #[test]
+    /// Allows large valid counts while rejecting impossible platform allocations.
+    fn test_platform_container_capacity() {
+        assert_eq!(value_count::<Value<'_>>(0).unwrap(), 0);
+        assert!(value_count::<Value<'_>>(u64::MAX).is_err());
+        assert!(value_count::<Value<'_>>(1_000_001).is_ok());
+    }
 
     #[test]
     fn test_result_stream_reader() {
@@ -1247,10 +1552,13 @@ mod tests {
         let mut reader = value_document_reader(bytes.as_slice()).unwrap();
         assert!(!reader.is_streaming_result());
         assert_eq!(reader.item_type(), None);
-        let Value::Enum(index, payload) = reader.next().unwrap().unwrap() else {
+        let Value::Enumeration { index, payload } = reader.next().unwrap().unwrap() else {
             panic!("expected a Result value");
         };
-        assert_eq!(*payload, Value::String("failed".into()));
+        assert_eq!(
+            payload,
+            VariantValue::Newtype(Box::new(Value::String("failed".into())))
+        );
         assert!(
             matches!(&reader.root_type(), Type::Enum(_, variants) if variants[index as usize].name() == "Err")
         );
@@ -1261,7 +1569,8 @@ mod tests {
         assert!(!reader.is_streaming_result());
         assert!(matches!(
             reader.next().unwrap().unwrap(),
-            Value::Enum(_, payload) if *payload == Value::List(vec![Value::I32(7)])
+            Value::Enumeration { payload: VariantValue::Newtype(payload), .. }
+                if *payload == Value::List(vec![Value::I32(7)])
         ));
         assert!(reader.next().is_none());
     }
