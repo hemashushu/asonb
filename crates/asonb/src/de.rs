@@ -169,14 +169,18 @@ pub enum ResultStreamReader<T, E, R: Read> {
     Err(E),
 }
 
-/// Opens a document for dynamic inspection, streaming only MultiChunk root Lists.
+/// Opens a document for dynamic inspection, streaming MultiChunk List payloads.
 ///
-/// `reader` starts at the header. For a MultiChunk List, the returned iterator
-/// decodes one owned element at a time and does not probe beyond its marker.
-/// Every other root, including regular Lists, is fully read and EOF-checked
-/// during construction; iteration then yields that root once. Thus construction
-/// may block on a live nonstreaming source. Errors are returned either here or,
-/// for streamed payloads, by the iterator at the point they are encountered.
+/// `reader` starts at the header. For a MultiChunk root List, the returned
+/// iterator decodes one owned element at a time and does not probe beyond its
+/// marker. For a root `Result` whose selected `Ok` payload is a MultiChunk List,
+/// construction consumes the variant index and the iterator yields the List
+/// elements in the same way; like [`result_stream_reader`], that nested List
+/// requires an explicit end marker. Every other root, including regular Lists
+/// and `Result::Err`, is fully read and EOF-checked during construction;
+/// iteration then yields that root once. Thus construction may block on a live
+/// nonstreaming source. Errors are returned either here or, for streamed
+/// payloads, by the iterator at the point they are encountered.
 ///
 /// ```
 /// let bytes = asonb::ser_to_bytes(&42i32)?;
@@ -191,12 +195,29 @@ pub fn value_document_reader<R: Read>(reader: R) -> Result<ValueDocumentReader<R
     input.header()?;
     let schema = DocumentSchema::read(&mut input)?;
     let root = schema.resolve(schema.root.clone())?;
-    let (item, pending) = match &root {
-        Type::List(Encoding::MultiChunk, item) => (Some((**item).clone()), None),
+    let (item, list_root, pending) = match &root {
+        Type::List(Encoding::MultiChunk, item) => (Some((**item).clone()), true, None),
+        Type::Enum(name, _) if name == "Result" => {
+            let (index, variant) =
+                Deserializer::new(&mut input, &schema, root.clone(), true).enumeration()?;
+            let payload = payload_type(&variant);
+            match (&variant, schema.resolve(payload.clone())?) {
+                (Variant::Newtype(name, _), Type::List(Encoding::MultiChunk, item))
+                    if name == "Ok" =>
+                {
+                    (Some(*item), false, None)
+                }
+                _ => {
+                    let value = read_value(&mut input, &schema, &payload, false)?;
+                    input.finish()?;
+                    (None, false, Some(Value::Enum(index, Box::new(value))))
+                }
+            }
+        }
         _ => {
             let value = read_value(&mut input, &schema, &root, true)?;
             input.finish()?;
-            (None, Some(value))
+            (None, true, Some(value))
         }
     };
     Ok(ValueDocumentReader {
@@ -204,6 +225,7 @@ pub fn value_document_reader<R: Read>(reader: R) -> Result<ValueDocumentReader<R
         schema,
         root,
         item,
+        list_root,
         pending,
         remaining: 0,
         finished: false,
@@ -798,9 +820,10 @@ pub struct ListStreamReader<T, R: Read> {
     marker: PhantomData<fn() -> T>,
 }
 
-/// Reads a dynamic document, streaming items only for a multi-chunk root List.
-/// Other roots are materialized during construction and yielded once. Both
-/// modes return owned values and remain exhausted after the first error or end.
+/// Reads a dynamic document, streaming items for a multi-chunk root List or the
+/// multi-chunk List inside a root `Result::Ok`. Other roots are materialized
+/// during construction and yielded once. All modes return owned values and
+/// remain exhausted after the first error or end.
 pub struct ValueDocumentReader<R: Read> {
     /// Source cursor, retained for lazy MultiChunk List reads.
     input: ReaderInput<R>,
@@ -810,6 +833,9 @@ pub struct ValueDocumentReader<R: Read> {
     root: Type,
     /// Element schema for streaming mode, or None for a single materialized root.
     item: Option<Type>,
+    /// Whether the streamed List is the root, which also accepts EOF between
+    /// chunks; a List inside `Result::Ok` requires an explicit end marker.
+    list_root: bool,
     /// A nonstreaming root waiting to be returned on the first iterator call.
     pending: Option<Value<'static>>,
     /// Elements left in the current streaming chunk.
@@ -862,7 +888,44 @@ impl<R: Read> ValueDocumentReader<R> {
     /// # Ok::<(), asonb::AsonbError>(())
     /// ```
     pub fn is_streaming_list(&self) -> bool {
-        self.item.is_some()
+        self.item.is_some() && self.list_root
+    }
+
+    /// Reports whether iteration yields the List elements inside `Result::Ok`.
+    ///
+    /// There are no arguments. Only a root `Result` whose selected `Ok` payload
+    /// is a MultiChunk List selects this mode; the variant index has already
+    /// been consumed. `Result::Err` and other `Ok` payloads are yielded once as
+    /// a whole [`Value::Enum`].
+    ///
+    /// ```
+    /// let mut bytes = Vec::new();
+    /// let mut writer = asonb::result_stream_writer::<i32, String, _>(&mut bytes).start_ok()?;
+    /// writer.writes(&[10, 20])?;
+    /// writer.end_list()?;
+    /// let mut reader = asonb::value_document_reader(bytes.as_slice())?;
+    /// assert!(reader.is_streaming_result());
+    /// assert_eq!(reader.item_type(), Some(&asonb::Type::I32));
+    /// assert_eq!(reader.next().transpose()?, Some(asonb::Value::I32(10)));
+    /// # Ok::<(), asonb::AsonbError>(())
+    /// ```
+    pub fn is_streaming_result(&self) -> bool {
+        self.item.is_some() && !self.list_root
+    }
+
+    /// Borrows the element type of the streamed List, if any.
+    ///
+    /// Returns `None` when the reader yields a single materialized root. The
+    /// type may be a reference into the table available through [`Self::schema`].
+    ///
+    /// ```
+    /// # let bytes = asonb::ser_to_bytes(&42i32)?;
+    /// let reader = asonb::value_document_reader(bytes.as_slice())?;
+    /// assert_eq!(reader.item_type(), None);
+    /// # Ok::<(), asonb::AsonbError>(())
+    /// ```
+    pub fn item_type(&self) -> Option<&Type> {
+        self.item.as_ref()
     }
 }
 
@@ -884,7 +947,7 @@ impl<R: Read> Iterator for ValueDocumentReader<R> {
         };
         let result = (|| {
             if self.remaining == 0 {
-                self.remaining = self.input.chunk(true)? as u64;
+                self.remaining = self.input.chunk(self.list_root)? as u64;
                 if self.remaining == 0 {
                     return Ok(None);
                 }
@@ -1149,6 +1212,57 @@ mod tests {
         let mut reader = value_document_reader(bytes.as_slice()).unwrap();
         assert!(!reader.is_streaming_list());
         assert_eq!(reader.next().unwrap().unwrap(), Value::I32(9));
+        assert!(reader.next().is_none());
+    }
+
+    #[test]
+    /// Streams `Result::Ok` MultiChunk elements and materializes other Result roots.
+    fn test_dynamic_value_document_reader_streams_result_ok_lists() {
+        let mut bytes = Vec::new();
+        let mut writer = crate::result_stream_writer::<i32, String, _>(&mut bytes)
+            .start_ok()
+            .unwrap();
+        writer.writes(&[11, 13]).unwrap();
+        writer.end_list().unwrap();
+        let mut reader = value_document_reader(bytes.as_slice()).unwrap();
+        assert!(reader.is_streaming_result());
+        assert!(!reader.is_streaming_list());
+        assert_eq!(reader.item_type(), Some(&Type::I32));
+        assert_eq!(reader.next().unwrap().unwrap(), Value::I32(11));
+        assert_eq!(reader.next().unwrap().unwrap(), Value::I32(13));
+        assert!(reader.next().is_none());
+
+        // The nested List must end with its marker; EOF at a chunk boundary is truncation.
+        let truncated = &bytes[..bytes.len() - 4];
+        let mut reader = value_document_reader(truncated).unwrap();
+        assert_eq!(reader.next().unwrap().unwrap(), Value::I32(11));
+        assert_eq!(reader.next().unwrap().unwrap(), Value::I32(13));
+        assert!(reader.next().unwrap().is_err());
+        assert!(reader.next().is_none());
+
+        let mut bytes = Vec::new();
+        crate::result_stream_writer::<i32, String, _>(&mut bytes)
+            .write_err(&"failed".to_owned())
+            .unwrap();
+        let mut reader = value_document_reader(bytes.as_slice()).unwrap();
+        assert!(!reader.is_streaming_result());
+        assert_eq!(reader.item_type(), None);
+        let Value::Enum(index, payload) = reader.next().unwrap().unwrap() else {
+            panic!("expected a Result value");
+        };
+        assert_eq!(*payload, Value::String("failed".into()));
+        assert!(
+            matches!(&reader.root_type(), Type::Enum(_, variants) if variants[index as usize].name() == "Err")
+        );
+        assert!(reader.next().is_none());
+
+        let bytes = ser_to_bytes(&Ok::<Vec<i32>, String>(vec![7])).unwrap();
+        let mut reader = value_document_reader(bytes.as_slice()).unwrap();
+        assert!(!reader.is_streaming_result());
+        assert!(matches!(
+            reader.next().unwrap().unwrap(),
+            Value::Enum(_, payload) if *payload == Value::List(vec![Value::I32(7)])
+        ));
         assert!(reader.next().is_none());
     }
 

@@ -58,7 +58,8 @@
 //! pipeline wrapped in `Result<Vec<T>, E>`. The successful nested List requires
 //! an explicit end marker; business errors are decoded in full before returning.
 //! [`value_document_reader`] makes the same List/non-List distinction while
-//! returning dynamic values rather than a predetermined Rust type.
+//! returning dynamic values rather than a predetermined Rust type; it also
+//! streams the MultiChunk List inside a root `Result::Ok`.
 //!
 //! Use [`Value`] with [`DocumentSchema`] when the application must choose Long
 //! or MultiChunk framing explicitly or inspect data without a Rust model.
