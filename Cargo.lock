@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "asonb"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "asonb-derive",
  "chrono",
@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "asonb-derive"
-version = "4.0.0"
+version = "4.1.1"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

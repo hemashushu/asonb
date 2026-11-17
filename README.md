@@ -1,6 +1,6 @@
 # ASONB
 
-_ASONB_ is a binary representation of ASON optimized for efficient storage, access, and transmission.
+_ASONB_ is a binary representation of [ASON](https://github.com/hemashushu/ason), the strongly typed data format built as a common language for AI agents, tools, and people. ASONB is optimized for efficient storage, access, and transmission. Together, ASON and ASONB form the data foundation for agent-oriented software: ASON for data that people and agents read and edit, ASONB for data that machines exchange and store.
 
 _ASONB_ supports streaming and limited incremental updates, making it suitable for use cases ranging from simple persistence to data-processing pipelines.
 
